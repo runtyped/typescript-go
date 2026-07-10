@@ -214,3 +214,62 @@ func TestDeclareFiltering(t *testing.T) {
 		assertContains(t, output, "__ΩRegularEnum")
 	})
 }
+
+// ─── Extended declare filtering tests ───
+
+func TestDeclareFilteringExtended(t *testing.T) {
+	t.Run("TypeReferencingDeclareType", func(t *testing.T) {
+		output := transformEmit(t, `declare type ExternalConfig = {
+    host: string;
+    port: number;
+};
+
+type AppConfig = ExternalConfig & {
+    appName: string;
+};`)
+
+		assertContains(t, output, "__ΩAppConfig")
+		assertNotContains(t, output, "__ΩExternalConfig")
+	})
+
+	t.Run("InterfaceExtendingDeclareInterface", func(t *testing.T) {
+		output := transformEmit(t, `declare interface BaseInterface {
+    id: string;
+}
+
+interface ExtendedInterface extends BaseInterface {
+    name: string;
+}`)
+
+		assertContains(t, output, "__ΩExtendedInterface")
+		assertNotContains(t, output, "__ΩBaseInterface")
+	})
+
+	t.Run("DeclareConstTypeof", func(t *testing.T) {
+		output := transformEmit(t, `declare const DECLARED_CONST: string;
+
+type MyType = typeof DECLARED_CONST;`)
+
+		assertContains(t, output, "__ΩMyType")
+	})
+
+	t.Run("MixDeclareAndNonDeclare", func(t *testing.T) {
+		output := transformEmit(t, `declare type DeclaredType = string;
+type RegularType = number;`)
+
+		assertNotContains(t, output, "__ΩDeclaredType")
+		assertContains(t, output, "__ΩRegularType")
+	})
+
+	t.Run("ExportDeclareTypeNoOmega", func(t *testing.T) {
+		output := transformEmit(t, `export declare type DeclaredType = string;`)
+		assertNotContains(t, output, "__ΩDeclaredType")
+	})
+
+	t.Run("ExportDeclareInterfaceNoOmega", func(t *testing.T) {
+		output := transformEmit(t, `export declare interface DeclaredInterface {
+    id: number;
+}`)
+		assertNotContains(t, output, "__ΩDeclaredInterface")
+	})
+}
