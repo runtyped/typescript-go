@@ -47,7 +47,8 @@ func TestReflectionTypeWalking(t *testing.T) {
 		{
 			title:  "LiteralString",
 			input:  "type Foo = \"hello\";",
-			output: "const __ΩFoo = [\"hello\", \"Foo\", \".!w!y\"];\ntype Foo = \"hello\";",
+			output: `const __ΩFoo = ["hello", "Foo", ".!w\"y"];
+type Foo = "hello";`,
 		},
 		{
 			title:  "Tuple",

@@ -78,6 +78,11 @@ func (tx *reflectionTransformer) visit(node *ast.Node) *ast.Node {
 // ─── SourceFile ───
 
 func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node {
+	// Skip non-TS/TSX files (JS, JSON, etc.)
+	if node.ScriptKind != core.ScriptKindTS && node.ScriptKind != core.ScriptKindTSX {
+		return node.AsNode()
+	}
+
 	// Reset per-file state
 	tx.omegaStatements = nil
 	tx.additionalImports = nil
@@ -101,6 +106,12 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 		statements = append(tx.omegaStatements, statements...)
 	}
 
+	// Append hoisted function __type assignments (fn.__type = [...])
+	// These go after omega statements but before additional imports
+	if len(tx.tc.functionTypeAssignments) > 0 {
+		statements = append(statements, tx.tc.functionTypeAssignments...)
+	}
+
 	// Append additional imports
 	if len(tx.additionalImports) > 0 {
 		statements = append(statements, tx.additionalImports...)
@@ -121,8 +132,9 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 func (tx *reflectionTransformer) processDeclarations() {
 	for {
 		allCompiled := true
-		for _, d := range tx.tc.compileDeclarations {
-			if d.compiled != nil {
+		for _, declNode := range tx.tc.compileDeclarationOrder {
+			d := tx.tc.compileDeclarations[declNode]
+			if d == nil || d.compiled != nil {
 				continue
 			}
 			allCompiled = false
@@ -133,9 +145,10 @@ func (tx *reflectionTransformer) processDeclarations() {
 			break
 		}
 
-		// Compile pending declarations
-		for declNode, d := range tx.tc.compileDeclarations {
-			if d.compiled != nil {
+		// Compile pending declarations (in insertion order)
+		for _, declNode := range tx.tc.compileDeclarationOrder {
+			d := tx.tc.compileDeclarations[declNode]
+			if d == nil || d.compiled != nil {
 				continue
 			}
 			d.compiled = tx.tc.createProgramVarFromNode(declNode, d.name)
@@ -246,7 +259,11 @@ func (tx *reflectionTransformer) visitTypeAliasDeclaration(node *ast.TypeAliasDe
 
 	// Register for compilation
 	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
-		tx.tc.compileDeclarations[node.AsNode()] = &compileDeclEntry{
+		declNode := node.AsNode()
+		if _, exists := tx.tc.compileDeclarations[declNode]; !exists {
+			tx.tc.compileDeclarationOrder = append(tx.tc.compileDeclarationOrder, declNode)
+		}
+		tx.tc.compileDeclarations[declNode] = &compileDeclEntry{
 			name:      getIdentifierName(visited.Name()),
 			sourceFile: tx.sourceFile,
 		}
@@ -259,7 +276,11 @@ func (tx *reflectionTransformer) visitInterfaceDeclaration(node *ast.InterfaceDe
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsInterfaceDeclaration()
 
 	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
-		tx.tc.compileDeclarations[node.AsNode()] = &compileDeclEntry{
+		declNode := node.AsNode()
+		if _, exists := tx.tc.compileDeclarations[declNode]; !exists {
+			tx.tc.compileDeclarationOrder = append(tx.tc.compileDeclarationOrder, declNode)
+		}
+		tx.tc.compileDeclarations[declNode] = &compileDeclEntry{
 			name:      getIdentifierName(visited.Name()),
 			sourceFile: tx.sourceFile,
 		}
@@ -272,7 +293,11 @@ func (tx *reflectionTransformer) visitEnumDeclaration(node *ast.EnumDeclaration)
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsEnumDeclaration()
 
 	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
-		tx.tc.compileDeclarations[node.AsNode()] = &compileDeclEntry{
+		declNode := node.AsNode()
+		if _, exists := tx.tc.compileDeclarations[declNode]; !exists {
+			tx.tc.compileDeclarationOrder = append(tx.tc.compileDeclarationOrder, declNode)
+		}
+		tx.tc.compileDeclarations[declNode] = &compileDeclEntry{
 			name:      getIdentifierName(visited.Name()),
 			sourceFile: tx.sourceFile,
 		}
@@ -294,9 +319,16 @@ func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.N
 	fnName := visited.Name()
 	if fnName == nil {
 		// Default export function — wrap with __assignType
+		// Strip export/default/decorator modifiers, preserve async
+		fnExpr := tx.createFunctionExpressionFromDeclaration(visited)
 		tx.tc.embedAssignType = true
 		return tx.Factory().NewExportAssignment(nil, false, nil,
-			tx.wrapWithAssignType(node, encodedType))
+			tx.wrapWithAssignType(fnExpr, encodedType))
+	}
+
+	// Skip functions named 'default' — `default.__type =` is invalid syntax
+	if fnName.Kind == ast.KindIdentifier && fnName.AsIdentifier().Text == "default" {
+		return visited.AsNode()
 	}
 
 	// fn.__type = encodedType
@@ -309,7 +341,8 @@ func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.N
 			encodedType))
 
 	// For module-level functions, hoist the __type assignment
-	if node.Parent != nil && node.Parent.Kind == ast.KindSourceFile {
+	// (parent is nil in synthetic test nodes — treat as module-level)
+	if node.Parent == nil || node.Parent.Kind == ast.KindSourceFile {
 		tx.tc.functionTypeAssignments = append(tx.tc.functionTypeAssignments, typeAssignment)
 		return visited.AsNode()
 	}
@@ -344,6 +377,32 @@ func (tx *reflectionTransformer) visitArrowFunction(node *ast.Node) *ast.Node {
 
 	tx.tc.embedAssignType = true
 	return tx.wrapWithAssignType(node, encodedType)
+}
+
+// createFunctionExpressionFromDeclaration converts a FunctionDeclaration to a FunctionExpression,
+// stripping export/default/decorator modifiers but preserving async.
+func (tx *reflectionTransformer) createFunctionExpressionFromDeclaration(decl *ast.FunctionDeclaration) *ast.Node {
+	// Filter modifiers: keep async, drop export/default/decorator
+	var keptModifiers []*ast.Node
+	if mods := decl.Modifiers(); mods != nil {
+		for _, mod := range mods.Nodes {
+			if mod.Kind != ast.KindExportKeyword && mod.Kind != ast.KindDefaultKeyword && mod.Kind != ast.KindDecorator {
+				keptModifiers = append(keptModifiers, mod)
+			}
+		}
+	}
+	modifierList := tx.Factory().NewModifierList(keptModifiers)
+
+	return tx.Factory().NewFunctionExpression(
+		modifierList,
+		decl.AsteriskToken,
+		nil, // name is nil for default exports
+		decl.TypeParameters,
+		decl.Parameters,
+		nil, // less than fullSignature
+		decl.Type,
+		decl.Body,
+	)
 }
 
 func (tx *reflectionTransformer) wrapWithAssignType(fn *ast.Node, typeExpr *ast.Node) *ast.Node {

@@ -140,8 +140,10 @@ func (p *compilerProgram) pushConditionalFrame() {
 }
 
 func (p *compilerProgram) pushStack(item stackEntry) int {
+	idx := len(p.stack)
 	p.stack = append(p.stack, item)
-	return p.stackPosition
+	p.stackPosition = idx + 1
+	return idx
 }
 
 func (p *compilerProgram) pushStackNode(node *ast.Node) int {

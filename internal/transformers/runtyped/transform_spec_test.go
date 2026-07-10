@@ -1,0 +1,124 @@
+package runtyped_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/printer"
+	"github.com/microsoft/typescript-go/internal/testutil/parsetestutil"
+	"github.com/microsoft/typescript-go/internal/transformers"
+	"github.com/microsoft/typescript-go/internal/transformers/runtyped"
+)
+
+// transformEmit runs the reflection transformer on the given input and returns the emitted code.
+func transformEmit(t *testing.T, input string) string {
+	t.Helper()
+	file := parsetestutil.ParseTypeScript(input, false)
+	parsetestutil.CheckDiagnostics(t, file)
+	compilerOptions := &core.CompilerOptions{}
+	emitContext := printer.NewEmitContext()
+	transformed := runtyped.NewReflectionTransformer(&transformers.TransformOptions{
+		CompilerOptions: compilerOptions,
+		Context:         emitContext,
+	}).TransformSourceFile(file)
+	p := printer.NewPrinter(printer.PrinterOptions{NewLine: core.NewLineKindLF}, printer.PrintHandlers{}, emitContext)
+	text := p.EmitSourceFile(transformed)
+	return strings.TrimSuffix(text, "\n")
+}
+
+// assertContains checks that the output contains the given substring.
+func assertContains(t *testing.T, output, substr string) {
+	t.Helper()
+	if !strings.Contains(output, substr) {
+		t.Errorf("expected output to contain %q\noutput:\n%s", substr, output)
+	}
+}
+
+// assertNotContains checks that the output does NOT contain the given substring.
+func assertNotContains(t *testing.T, output, substr string) {
+	t.Helper()
+	if strings.Contains(output, substr) {
+		t.Errorf("expected output to NOT contain %q\noutput:\n%s", substr, output)
+	}
+}
+
+// Port of transform.spec.ts — tests the reflection transformer against
+// expected behaviors from the original TypeScript type-compiler test suite.
+//
+// The TS tests use `expect(code).toContain(...)` assertions rather than
+// exact equality checks, so we mirror that with assertContains.
+//
+// Only single-file tests are ported here. Multi-file tests (resolve import,
+// declaration file, re-export) require a vfs/host test harness and are
+// deferred to a later phase.
+func TestTransformSpec(t *testing.T) {
+	t.Parallel()
+
+	t.Run("TransformSimpleTS", func(t *testing.T) {
+		t.Parallel()
+		// function fn(logger: Logger) {} — should get fn.__type
+		// Logger is unresolved (single-file), so it emits as a reference
+		output := transformEmit(t, `import { Logger } from './logger.js';
+
+function fn(logger: Logger) {}`)
+		assertContains(t, output, "fn.__type")
+	})
+
+	t.Run("TransformSimpleJS", func(t *testing.T) {
+		t.Parallel()
+		// JS files should NOT be transformed
+		file := parsetestutil.ParseTypeScript(`
+        import { Logger } from './logger.js';
+        const a = (v) => {
+            return v + 1;
+        }
+        function fn(logger) {}`, false)
+		// Mark as JS
+		file.ScriptKind = core.ScriptKindJS
+		compilerOptions := &core.CompilerOptions{}
+		emitContext := printer.NewEmitContext()
+		transformed := runtyped.NewReflectionTransformer(&transformers.TransformOptions{
+			CompilerOptions: compilerOptions,
+			Context:         emitContext,
+		}).TransformSourceFile(file)
+		p := printer.NewPrinter(printer.PrinterOptions{NewLine: core.NewLineKindLF}, printer.PrintHandlers{}, emitContext)
+		output := strings.TrimSuffix(p.EmitSourceFile(transformed), "\n")
+		assertNotContains(t, output, "fn.__type")
+	})
+
+	t.Run("TransformUtil", func(t *testing.T) {
+		t.Parallel()
+		output := transformEmit(t, `function log(message: string) {}`)
+		assertContains(t, output, "log.__type = ")
+	})
+
+	t.Run("ClassExpression", func(t *testing.T) {
+		t.Parallel()
+		output := transformEmit(t, `const a = class {};`)
+		assertContains(t, output, "static __type = [")
+	})
+
+	t.Run("ExportDefaultFunction", func(t *testing.T) {
+		t.Parallel()
+		output := transformEmit(t, "export default function(bar: string) {\n    return bar;\n}")
+		assertContains(t, output, "export default __assignType(function (bar: string")
+	})
+
+	t.Run("ExportDefaultAsyncFunction", func(t *testing.T) {
+		t.Parallel()
+		output := transformEmit(t, "export default async function(bar: string) {\n    return bar;\n}")
+		assertContains(t, output, "export default __assignType(async function (bar: string")
+	})
+
+	t.Run("DefaultFunctionName", func(t *testing.T) {
+		t.Parallel()
+		output := transformEmit(t, `const a = {
+    default(val: any): any {
+        console.log('default', val)
+        return 'default'
+    }
+};`)
+		assertNotContains(t, output, "function default(")
+	})
+}

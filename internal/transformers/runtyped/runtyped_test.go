@@ -21,6 +21,10 @@ import (
 //   '!' = 0 (never), '"' = 1 (any), '&' = 5 (string), "'" = 6 (number),
 //   '0' = 17 (parameter), '3' = 20 (class), '5' = 22 (classReference),
 //   'P' = 48 (method), 'w' = 86 (typeName), 'y' = 88 (nominal)
+//
+// NOTE: Stack indices > 0 produce characters that need JS escaping.
+//   Index 0 → '!' (33), Index 1 → '"' (34, escaped as \" in JS strings),
+//   Index 2 → '#' (35), etc.
 func TestReflectionTransformer(t *testing.T) {
 	t.Parallel()
 	data := []struct {
@@ -29,24 +33,36 @@ func TestReflectionTransformer(t *testing.T) {
 		output string
 	}{
 		{
-			title:  "SimpleClass",
-			input:  "class User { name: string; age: number; }",
-			output: "class User {\n    name: string;\n    age: number;\n    static __type = [\"name\", \"age\", \"User\", \"&3!'3!5w!\"];\n}",
+			title: "SimpleClass",
+			input: "class User { name: string; age: number; }",
+			output: `class User {
+    name: string;
+    age: number;
+    static __type = ["name", "age", "User", "&3!'3\"5w#"];
+}`,
 		},
 		{
 			title:  "EmptyClass",
 			input:  "class Empty { }",
-			output: "class Empty {\n    static __type = [\"Empty\", \"5w!\"];\n}",
+			output: `class Empty {
+    static __type = ["Empty", "5w!"];
+}`,
 		},
 		{
-			title:  "ClassExpression",
-			input:  "(class User { name: string; })",
-			output: "(class User {\n    name: string;\n    static __type = [\"name\", \"User\", \"&3!5w!\"];\n});",
+			title: "ClassExpression",
+			input: "(class User { name: string; })",
+			output: `(class User {
+    name: string;
+    static __type = ["name", "User", "&3!5w\""];
+});`,
 		},
 		{
-			title:  "ClassWithMethod",
-			input:  "class Service { greet(): string { return 'hi'; } }",
-			output: "class Service {\n    greet(): string { return 'hi'; }\n    static __type = [\"greet\", \"Service\", \"P&0!5w!\"];\n}",
+			title: "ClassWithMethod",
+			input: "class Service { greet(): string { return 'hi'; } }",
+			output: `class Service {
+    greet(): string { return 'hi'; }
+    static __type = ["greet", "Service", "P&0!5w\""];
+}`,
 		},
 		{
 			title:  "NonClassPreserved",
@@ -54,30 +70,44 @@ func TestReflectionTransformer(t *testing.T) {
 			output: "const x = 42;",
 		},
 		{
-			title:  "FunctionPreserved",
-			input:  "function add(a: number, b: number): number { return a + b; }",
-			output: "function add(a: number, b: number): number { return a + b; }",
+			title: "FunctionDeclaration",
+			input: "function add(a: number, b: number): number { return a + b; }",
+			output: `function add(a: number, b: number): number { return a + b; }
+add.__type = ["a", "b", "add", "P'2!'2\"'/#"];`,
 		},
 		{
-			title:  "MultipleClasses",
-			input:  "class A { a: string; }\nclass B { b: number; }",
-			output: "class A {\n    a: string;\n    static __type = [\"a\", \"A\", \"&3!5w!\"];\n}\nclass B {\n    b: number;\n    static __type = [\"b\", \"B\", \"'3!5w!\"];\n}",
+			title: "MultipleClasses",
+			input: "class A { a: string; }\nclass B { b: number; }",
+			output: `class A {
+    a: string;
+    static __type = ["a", "A", "&3!5w\""];
+}
+class B {
+    b: number;
+    static __type = ["b", "B", "'3!5w\""];
+}`,
 		},
 		// ─── Type aliases ───
 		{
 			title:  "TypeAlias",
 			input:  "type Foo = string;",
-			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\ntype Foo = string;",
+			output: `const __ΩFoo = ["Foo", "&w!y"];
+type Foo = string;`,
 		},
 		{
 			title:  "ExportedTypeAlias",
 			input:  "export type Foo = string;",
-			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\nexport { __ΩFoo as __ΩFoo };\nexport type Foo = string;",
+			output: `const __ΩFoo = ["Foo", "&w!y"];
+export { __ΩFoo as __ΩFoo };
+export type Foo = string;`,
 		},
 		{
 			title:  "MultipleTypeAliases",
 			input:  "type Foo = string;\ntype Bar = number;",
-			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\nconst __ΩBar = [\"Bar\", \"'w!y\"];\ntype Foo = string;\ntype Bar = number;",
+			output: `const __ΩFoo = ["Foo", "&w!y"];
+const __ΩBar = ["Bar", "'w!y"];
+type Foo = string;
+type Bar = number;`,
 		},
 		// ─── Imports ───
 		{
@@ -98,14 +128,24 @@ func TestReflectionTransformer(t *testing.T) {
 		},
 		// ─── Combined scenarios ───
 		{
-			title:  "ClassAndTypeAlias",
-			input:  "type Status = string;\nclass User { status: Status; }",
-			output: "const __ΩStatus = [\"Status\", \"&w!y\"];\ntype Status = string;\nclass User {\n    status: Status;\n    static __type = [\"status\", \"User\", \"!3!5w!\"];\n}",
+			title: "ClassAndTypeAlias",
+			input: "type Status = string;\nclass User { status: Status; }",
+			output: `const __ΩStatus = ["Status", "&w!y"];
+type Status = string;
+class User {
+    status: Status;
+    static __type = ["status", "User", "!3!5w\""];
+}`,
 		},
 		{
 			title:  "ImportAndClass",
 			input:  "import { User } from './models';\nclass Service { user: User; }",
-			output: "import { User } from './models';\nclass Service {\n    user: User;\n    static __type = [\"user\", \"Service\", \"!3!5w!\"];\n}\nimport { __ΩUser } from './models';",
+			output: `import { User } from './models';
+class Service {
+    user: User;
+    static __type = ["user", "Service", "!3!5w\""];
+}
+import { __ΩUser } from './models';`,
 		},
 	}
 
@@ -131,36 +171,49 @@ func TestReflectionTransformerWithTypeEraser(t *testing.T) {
 		output string
 	}{
 		{
-			title:  "SimpleClass",
-			input:  "class User { name: string; age: number; }",
-			output: "class User {\n    name;\n    age;\n    static __type = [\"name\", \"age\", \"User\", \"&3!'3!5w!\"];\n}",
+			title: "SimpleClass",
+			input: "class User { name: string; age: number; }",
+			output: `class User {
+    name;
+    age;
+    static __type = ["name", "age", "User", "&3!'3\"5w#"];
+}`,
 		},
 		{
 			title:  "EmptyClass",
 			input:  "class Empty { }",
-			output: "class Empty {\n    static __type = [\"Empty\", \"5w!\"];\n}",
+			output: `class Empty {
+    static __type = ["Empty", "5w!"];
+}`,
 		},
 		{
-			title:  "FunctionPreserved",
-			input:  "function add(a: number, b: number): number { return a + b; }",
-			output: "function add(a, b) { return a + b; }",
+			title: "FunctionDeclaration",
+			input: "function add(a: number, b: number): number { return a + b; }",
+			output: `function add(a, b) { return a + b; }
+add.__type = ["a", "b", "add", "P'2!'2\"'/#"];`,
 		},
 		// ─── Type aliases are elided by type eraser, __Ω survives ───
 		{
 			title:  "TypeAliasElided",
 			input:  "type Foo = string;",
-			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];",
+			output: `const __ΩFoo = ["Foo", "&w!y"];`,
 		},
 		{
 			title:  "ExportedTypeAliasElided",
 			input:  "export type Foo = string;",
-			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\nexport { __ΩFoo as __ΩFoo };",
+			output: `const __ΩFoo = ["Foo", "&w!y"];
+export { __ΩFoo as __ΩFoo };`,
 		},
 		// ─── Imports: original import kept (import elision is a separate transformer) ───
 		{
 			title:  "ImportWithClass",
 			input:  "import { User } from './models';\nclass Service { user: User; }",
-			output: "import { User } from './models';\nclass Service {\n    user;\n    static __type = [\"user\", \"Service\", \"!3!5w!\"];\n}\nimport { __ΩUser } from './models';",
+			output: `import { User } from './models';
+class Service {
+    user;
+    static __type = ["user", "Service", "!3!5w\""];
+}
+import { __ΩUser } from './models';`,
 		},
 		// ─── Re-exports: original re-export kept (import elision is a separate transformer) ───
 		{

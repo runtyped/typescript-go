@@ -21,6 +21,8 @@ type typeCompiler struct {
 
 	// compileDeclarations: types in the same file that need __Ω
 	compileDeclarations map[*ast.Node]*compileDeclEntry
+	// compileDeclarationOrder: preserves insertion order (Go maps are unordered)
+	compileDeclarationOrder []*ast.Node
 	// embedDeclarations: imported/global types that need inlining
 	embedDeclarations map[*ast.Node]*embedDeclEntry
 	// compiledDeclarations: track what's already been compiled (to break recursion)
@@ -70,10 +72,11 @@ type reExportSymbol struct {
 
 func newTypeCompiler(factory *printer.NodeFactory) *typeCompiler {
 	return &typeCompiler{
-		factory:              factory,
-		compileDeclarations:  make(map[*ast.Node]*compileDeclEntry),
-		embedDeclarations:    make(map[*ast.Node]*embedDeclEntry),
-		compiledDeclarations: make(map[*ast.Node]bool),
+		factory:                factory,
+		compileDeclarations:    make(map[*ast.Node]*compileDeclEntry),
+		compileDeclarationOrder: nil,
+		embedDeclarations:      make(map[*ast.Node]*embedDeclEntry),
+		compiledDeclarations:   make(map[*ast.Node]bool),
 	}
 }
 
