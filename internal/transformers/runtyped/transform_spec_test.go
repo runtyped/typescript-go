@@ -171,3 +171,46 @@ func TestReceiveTypeSingleFile(t *testing.T) {
 		assertContains(t, output, "getType.Ω = [")
 	})
 }
+
+// ─── Declare statement filtering tests ───
+
+func TestDeclareFiltering(t *testing.T) {
+	t.Run("DeclareTypeNoOmega", func(t *testing.T) {
+		output := transformEmit(t, `declare type DeclaredType = string;`)
+		assertNotContains(t, output, "__ΩDeclaredType")
+	})
+
+	t.Run("DeclareInterfaceNoOmega", func(t *testing.T) {
+		output := transformEmit(t, `declare interface DeclaredInterface {
+    id: number;
+    name: string;
+}`)
+		assertNotContains(t, output, "__ΩDeclaredInterface")
+	})
+
+	t.Run("DeclareEnumNoOmega", func(t *testing.T) {
+		output := transformEmit(t, `declare enum DeclaredEnum {
+    A, B, C
+}`)
+		assertNotContains(t, output, "__ΩDeclaredEnum")
+	})
+
+	t.Run("RegularTypeAliasGeneratesOmega", func(t *testing.T) {
+		output := transformEmit(t, `type RegularType = string;`)
+		assertContains(t, output, "__ΩRegularType")
+	})
+
+	t.Run("RegularInterfaceGeneratesOmega", func(t *testing.T) {
+		output := transformEmit(t, `interface RegularInterface {
+    id: number;
+}`)
+		assertContains(t, output, "__ΩRegularInterface")
+	})
+
+	t.Run("RegularEnumGeneratesOmega", func(t *testing.T) {
+		output := transformEmit(t, `enum RegularEnum {
+    A, B, C
+}`)
+		assertContains(t, output, "__ΩRegularEnum")
+	})
+}

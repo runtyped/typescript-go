@@ -72,8 +72,8 @@ func TestReflectionTransformer(t *testing.T) {
 		{
 			title: "FunctionDeclaration",
 			input: "function add(a: number, b: number): number { return a + b; }",
-			output: `function add(a: number, b: number): number { return a + b; }
-add.__type = ["a", "b", "add", "P'2!'2\"'/#"];`,
+			output: `add.__type = ["a", "b", "add", "P'2!'2\"'/#"];
+function add(a: number, b: number): number { return a + b; }`,
 		},
 		{
 			title: "MultipleClasses",
@@ -191,8 +191,8 @@ func TestReflectionTransformerWithTypeEraser(t *testing.T) {
 		{
 			title: "FunctionDeclaration",
 			input: "function add(a: number, b: number): number { return a + b; }",
-			output: `function add(a, b) { return a + b; }
-add.__type = ["a", "b", "add", "P'2!'2\"'/#"];`,
+			output: `add.__type = ["a", "b", "add", "P'2!'2\"'/#"];
+function add(a, b) { return a + b; }`,
 		},
 		// ─── Type aliases are elided by type eraser, __Ω survives ───
 		{

@@ -435,3 +435,93 @@ export type a = Partial<User>;`},
 		t.Errorf("expected __ΩPartial to be embedded in output")
 	}
 }
+
+func TestFunctionTypeHoisting(t *testing.T) {
+	inputFiles := []*harnessutil.TestFile{
+		{UnitName: "app.ts", Content: `function greet(name: string): string {
+    return "Hello, " + name;
+}`},
+	}
+
+	result := harnessutil.CompileFiles(t,
+		inputFiles,
+		nil,
+		harnessutil.TestConfiguration{},
+		&tsoptions.ParsedCommandLine{
+			ParsedConfig: &core.ParsedOptions{
+				CompilerOptions: &core.CompilerOptions{
+					Module:           core.ModuleKindCommonJS,
+					ModuleResolution: core.ModuleResolutionKindNode10,
+					Target:           core.ScriptTargetES2016,
+				},
+				FileNames: []string{"/app.ts"},
+			},
+		},
+		"/",
+		nil,
+	)
+
+	appJS := result.JS.GetOrZero("/app.js")
+	if appJS == nil {
+		t.Fatal("no app.js output")
+	}
+	t.Logf("app.js output:\n%s", appJS.Content)
+
+	// __type assignment is hoisted to the top
+	funcIdx := strings.Index(appJS.Content, "function greet")
+	typeIdx := strings.Index(appJS.Content, "greet.__type")
+	if funcIdx < 0 {
+		t.Fatal("function greet not found")
+	}
+	if typeIdx < 0 {
+		t.Fatal("greet.__type not found")
+	}
+	if typeIdx >= funcIdx {
+		t.Errorf("greet.__type should be hoisted before function declaration (typeIdx=%d, funcIdx=%d)", typeIdx, funcIdx)
+	}
+}
+
+func TestFunctionTypeHoistingBlockScoped(t *testing.T) {
+	inputFiles := []*harnessutil.TestFile{
+		{UnitName: "app.ts", Content: `if (true) {
+    function insideIf(x: number): void {}
+}`},
+	}
+
+	result := harnessutil.CompileFiles(t,
+		inputFiles,
+		nil,
+		harnessutil.TestConfiguration{},
+		&tsoptions.ParsedCommandLine{
+			ParsedConfig: &core.ParsedOptions{
+				CompilerOptions: &core.CompilerOptions{
+					Module:           core.ModuleKindCommonJS,
+					ModuleResolution: core.ModuleResolutionKindNode10,
+					Target:           core.ScriptTargetES2016,
+				},
+				FileNames: []string{"/app.ts"},
+			},
+		},
+		"/",
+		nil,
+	)
+
+	appJS := result.JS.GetOrZero("/app.js")
+	if appJS == nil {
+		t.Fatal("no app.js output")
+	}
+	t.Logf("app.js output:\n%s", appJS.Content)
+
+	// Block-scoped: __type should be after function (inline)
+	funcIdx := strings.Index(appJS.Content, "function insideIf")
+	typeIdx := strings.Index(appJS.Content, "insideIf.__type")
+	if funcIdx < 0 {
+		t.Fatal("function insideIf not found")
+	}
+	if typeIdx < 0 {
+		t.Fatal("insideIf.__type not found")
+	}
+	if typeIdx < funcIdx {
+		t.Errorf("insideIf.__type should be inline (after function), not hoisted (typeIdx=%d, funcIdx=%d)", typeIdx, funcIdx)
+	}
+}

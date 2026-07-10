@@ -110,21 +110,38 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsSourceFile()
 
 	// Collect all top-level statements
-	statements := visited.Statements.Nodes
+	originalStatements := visited.Statements.Nodes
 
 	// Process compileDeclarations and embedDeclarations
 	// This is the iterative loop from compiler.ts that compiles all pending declarations
 	tx.processDeclarations()
 
-	// Prepend omega variables (type alias/interface/enum declarations)
-	if len(tx.omegaStatements) > 0 {
-		statements = append(tx.omegaStatements, statements...)
+	// Build new top statements: omega variables + hoisted function __type assignments
+	var newTopStatements []*ast.Node
+	newTopStatements = append(newTopStatements, tx.omegaStatements...)
+	newTopStatements = append(newTopStatements, tx.tc.functionTypeAssignments...)
+
+	// Find "use strict" / "use client" directive to keep it at the top
+	literalIdx := -1
+	for i, stmt := range originalStatements {
+		if stmt.Kind == ast.KindExpressionStatement {
+			expr := stmt.AsExpressionStatement().Expression
+			if expr != nil && expr.Kind == ast.KindStringLiteral {
+				literalIdx = i
+				break
+			}
+		}
 	}
 
-	// Append hoisted function __type assignments (fn.__type = [...])
-	// These go after omega statements but before additional imports
-	if len(tx.tc.functionTypeAssignments) > 0 {
-		statements = append(statements, tx.tc.functionTypeAssignments...)
+	// Insert newTopStatements after any literal expression directive
+	var statements []*ast.Node
+	if literalIdx >= 0 {
+		statements = append(statements, originalStatements[:literalIdx+1]...)
+		statements = append(statements, newTopStatements...)
+		statements = append(statements, originalStatements[literalIdx+1:]...)
+	} else {
+		statements = append(statements, newTopStatements...)
+		statements = append(statements, originalStatements...)
 	}
 
 	// Append additional imports
@@ -359,18 +376,17 @@ func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.N
 			encodedType))
 
 	// For module-level functions, hoist the __type assignment
-	// (parent is nil in synthetic test nodes — treat as module-level)
 	if node.Parent == nil || node.Parent.Kind == ast.KindSourceFile {
 		tx.tc.functionTypeAssignments = append(tx.tc.functionTypeAssignments, typeAssignment)
 		return visited.AsNode()
 	}
 
-	// Block-scoped: return both
-	// Note: in Go AST, we can't return multiple nodes from a visitor.
-	// The TypeScript version returns [declaration, typeAssignment] as an array.
-	// We need to handle this differently — for now, append as a sibling.
-	// This is a known limitation that the test suite will surface.
-	return visited.AsNode()
+	// Block-scoped: return a block containing [function, __type assignment]
+	// since the visitor can only return one node, we wrap in a Block
+	return tx.Factory().NewBlock(tx.Factory().NewNodeList([]*ast.Node{
+		visited.AsNode(),
+		typeAssignment,
+	}), false)
 }
 
 func (tx *reflectionTransformer) visitFunctionExpression(node *ast.Node) *ast.Node {
