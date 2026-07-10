@@ -525,3 +525,163 @@ func TestFunctionTypeHoistingBlockScoped(t *testing.T) {
 		t.Errorf("insideIf.__type should be inline (after function), not hoisted (typeIdx=%d, funcIdx=%d)", typeIdx, funcIdx)
 	}
 }
+
+func TestInferTypeFix(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		checks  []string
+	}{
+		{
+			name: "GenericTypeParameterPassing",
+			content: `function a<T>(t: T): T {
+    return b<T>(t);
+}
+function b<T>(t: T): T {
+    return t;
+}
+a(1);`,
+			checks: []string{"a.__type", "b.__type"},
+		},
+		{
+			name: "NestedFunctionCalls",
+			content: `function outer<T>(value: T): T {
+    return middle<T>(value);
+}
+function middle<T>(value: T): T {
+    return inner<T>(value);
+}
+function inner<T>(value: T): T {
+    return value;
+}
+outer('test');`,
+			checks: []string{"outer.__type", "middle.__type", "inner.__type"},
+		},
+		{
+			name: "GenericTypeWithConstraints",
+			content: `function process<T extends object>(data: T): T {
+    return transform<T>(data);
+}
+function transform<T extends object>(data: T): T {
+    return data;
+}`,
+			checks: []string{"process.__type", "transform.__type"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputFiles := []*harnessutil.TestFile{
+				{UnitName: "app.ts", Content: tt.content},
+			}
+
+			result := harnessutil.CompileFiles(t,
+				inputFiles,
+				nil,
+				harnessutil.TestConfiguration{},
+				&tsoptions.ParsedCommandLine{
+					ParsedConfig: &core.ParsedOptions{
+						CompilerOptions: &core.CompilerOptions{
+							Module:           core.ModuleKindCommonJS,
+							ModuleResolution: core.ModuleResolutionKindNode10,
+							Target:           core.ScriptTargetES2016,
+						},
+						FileNames: []string{"/app.ts"},
+					},
+				},
+				"/",
+				nil,
+			)
+
+			appJS := result.JS.GetOrZero("/app.js")
+			if appJS == nil {
+				t.Fatal("no app.js output")
+			}
+
+			for _, check := range tt.checks {
+				if !strings.Contains(appJS.Content, check) {
+					t.Errorf("expected output to contain %q\noutput:\n%s", check, appJS.Content)
+				}
+			}
+		})
+	}
+}
+
+func TestDeclarationFileExportAll(t *testing.T) {
+	inputFiles := []*harnessutil.TestFile{
+		{UnitName: "app.ts", Content: `import { T, T2 } from './module';
+typeOf<T>();
+typeOf<T2>();`},
+		{UnitName: "module.d.ts", Content: `export * from './module/types';`},
+		{UnitName: "module/types.d.ts", Content: `export type T = string;
+export type T2 = string;
+export type __ΩT = any[];
+export type __ΩT2 = any[];`},
+	}
+
+	result := harnessutil.CompileFiles(t,
+		inputFiles,
+		nil,
+		harnessutil.TestConfiguration{},
+		&tsoptions.ParsedCommandLine{
+			ParsedConfig: &core.ParsedOptions{
+				CompilerOptions: &core.CompilerOptions{
+					Module:           core.ModuleKindCommonJS,
+					ModuleResolution: core.ModuleResolutionKindNode10,
+					Target:           core.ScriptTargetES2016,
+				},
+				FileNames: []string{"/app.ts", "/module.d.ts", "/module/types.d.ts"},
+			},
+		},
+		"/",
+		nil,
+	)
+
+	appJS := result.JS.GetOrZero("/app.js")
+	if appJS == nil {
+		t.Fatal("no app.js output")
+	}
+	t.Logf("app.js output:\n%s", appJS.Content)
+
+	// Should import __ΩT and __ΩT2 from './module'
+	if !strings.Contains(appJS.Content, "__ΩT") {
+		t.Errorf("expected __ΩT import")
+	}
+}
+
+func TestResolveImportNodeModules(t *testing.T) {
+	inputFiles := []*harnessutil.TestFile{
+		{UnitName: "app.ts", Content: `import { Logger } from 'logger';
+function fn(logger: Logger) {}`},
+		{UnitName: "node_modules/logger/index.d.ts", Content: `export declare class Logger {}`},
+	}
+
+	result := harnessutil.CompileFiles(t,
+		inputFiles,
+		nil,
+		harnessutil.TestConfiguration{},
+		&tsoptions.ParsedCommandLine{
+			ParsedConfig: &core.ParsedOptions{
+				CompilerOptions: &core.CompilerOptions{
+					Module:           core.ModuleKindCommonJS,
+					ModuleResolution: core.ModuleResolutionKindNode10,
+					Target:           core.ScriptTargetES2016,
+				},
+				FileNames: []string{"/app.ts", "/node_modules/logger/index.d.ts"},
+			},
+		},
+		"/",
+		nil,
+	)
+
+	appJS := result.JS.GetOrZero("/app.js")
+	if appJS == nil {
+		t.Fatal("no app.js output")
+	}
+	t.Logf("app.js output:\n%s", appJS.Content)
+
+	// Should reference Logger as a value (not __Ω since it's a class)
+	if !strings.Contains(appJS.Content, "Logger") {
+		t.Errorf("expected Logger reference in output")
+	}
+}
