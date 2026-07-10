@@ -16,6 +16,8 @@ type resolveDeclarationResult struct {
 // It is the Go equivalent of the TypeScript CompilerProgram + extractPackStructOfType logic.
 type typeCompiler struct {
 	factory *printer.NodeFactory
+	emitResolver printer.EmitResolver
+	sourceFiles  func() []*ast.SourceFile
 
 	sourceFile *ast.SourceFile
 
@@ -70,9 +72,11 @@ type reExportSymbol struct {
 	exportedName string
 }
 
-func newTypeCompiler(factory *printer.NodeFactory) *typeCompiler {
+func newTypeCompiler(factory *printer.NodeFactory, emitResolver printer.EmitResolver, sourceFiles func() []*ast.SourceFile) *typeCompiler {
 	return &typeCompiler{
 		factory:                factory,
+		emitResolver:           emitResolver,
+		sourceFiles:            sourceFiles,
 		compileDeclarations:    make(map[*ast.Node]*compileDeclEntry),
 		compileDeclarationOrder: nil,
 		embedDeclarations:      make(map[*ast.Node]*embedDeclEntry),
@@ -1196,12 +1200,25 @@ func (tc *typeCompiler) extractTypeReferenceFromEntityName(typeName *ast.Node, t
 					tc.resolveTypeOnlyImport(typeName, program)
 					return
 				}
-				// For .d.ts files, check if __Ω is exported
+				// For .d.ts files, check if __Ω{name} is explicitly exported
 				if declSourceFile != nil && isDtsFile(declSourceFile.FileName()) {
-					// Try to resolve __Ω symbol — for now, fall back to any
-					// Full resolution requires the Resolver which needs vfs
-					tc.resolveTypeOnlyImport(typeName, program)
-					return
+					// Look for __Ω{name} in the .d.ts file's locals
+					// runtimeTypeName is already __Ω{name}, so use it directly
+					omegaName := getIdentifierName(runtimeTypeName)
+					omegaDecl := tc.findDeclarationInFile(declSourceFile, omegaName)
+					_ = omegaName
+					if omegaDecl == nil {
+						// No __Ω exported — can't be sure the module is built with runtime types
+						tc.resolveTypeOnlyImport(typeName, program)
+						return
+					}
+					// __Ω exists in the .d.ts — emit import for it
+					if resolved.importDeclaration != nil {
+						tc.addImports = append(tc.addImports, &addImportEntry{
+							identifier: getIdentifierName(runtimeTypeName),
+							importDecl: resolved.importDeclaration,
+						})
+					}
 				} else {
 					// For .ts files, add import and use it
 					if resolved.importDeclaration != nil {
@@ -1406,13 +1423,10 @@ func (tc *typeCompiler) resolveDeclaration(typeName *ast.Node) *resolveDeclarati
 	}
 
 	if importDeclaration != nil {
-		// ImportClause.IsTypeOnly doesn't exist in typescript-go — type-only is
-		// determined by usage. For now, check if the import specifier is type-only.
-		// Resolve import to source declaration
-		// This requires the Resolver — deferred for now
-		// For same-file references, we can't resolve cross-file imports
+		// Try to resolve the import to the actual declaration in another file
+		resolvedDecl := tc.resolveImportSpecifier(name, importDeclaration)
 		return &resolveDeclarationResult{
-			declaration:      declaration,
+			declaration:      resolvedDecl,
 			importDeclaration: importDeclaration,
 			typeOnly:         typeOnly,
 		}
@@ -1583,4 +1597,237 @@ func (tc *typeCompiler) createProgramVarFromNode(node *ast.Node, name string) []
 	}
 
 	return []*ast.Node{variable}
+}
+
+// ─── Cross-file resolution ───
+
+// resolveImportSpecifier resolves an imported name to its actual declaration
+// in the source file that the import/export module specifier points to.
+// This is the Go equivalent of compiler.ts's resolveImportSpecifier.
+func (tc *typeCompiler) resolveImportSpecifier(declarationName string, importOrExport *ast.Node) *ast.Node {
+	if importOrExport == nil {
+		return nil
+	}
+
+	// Get the module specifier node
+	var moduleSpecifier *ast.Node
+	switch importOrExport.Kind {
+	case ast.KindImportDeclaration:
+		moduleSpecifier = importOrExport.AsImportDeclaration().ModuleSpecifier
+	case ast.KindExportDeclaration:
+		moduleSpecifier = importOrExport.AsExportDeclaration().ModuleSpecifier
+	default:
+		return nil
+	}
+
+	if moduleSpecifier == nil || !ast.IsStringLiteral(moduleSpecifier) {
+		return nil
+	}
+
+	// Use the EmitResolver to resolve the module specifier to a SourceFile
+	var sourceFile *ast.SourceFile
+	if tc.emitResolver != nil {
+		sourceFile = tc.emitResolver.GetExternalModuleFileFromDeclaration(importOrExport)
+	}
+
+	if sourceFile == nil {
+		// For .d.ts files, try to find the source file in the program's source files
+		// GetExternalModuleFileFromDeclaration may not return .d.ts files
+		sourceFile = tc.findSourceFileByModuleName(importOrExport)
+	}
+
+	if sourceFile == nil {
+		return nil
+	}
+
+	// Find the declaration in the resolved source file's locals
+	declaration := tc.findDeclarationInFile(sourceFile, declarationName)
+
+	if declaration != nil && declaration.Kind != ast.KindImportSpecifier {
+		// If it's an export declaration, follow the chain
+		if declaration.Kind == ast.KindExportDeclaration {
+			return tc.followExport(declarationName, declaration, sourceFile)
+		}
+		return declaration
+	}
+
+	// Not found directly — look through re-exports in the resolved file
+	if sourceFile.AsNode().LocalsContainerData() != nil {
+		for _, stmt := range sourceFile.Statements.Nodes {
+			if stmt.Kind != ast.KindExportDeclaration {
+				continue
+			}
+			found := tc.followExport(declarationName, stmt, sourceFile)
+			if found != nil {
+				return found
+			}
+		}
+	}
+
+	return nil
+}
+
+// findSourceFileByModuleName is a fallback for when GetExternalModuleFileFromDeclaration
+// returns nil (e.g. for .d.ts files). It searches through all source files in the
+// program to find one whose path matches the module specifier.
+func (tc *typeCompiler) findSourceFileByModuleName(importOrExport *ast.Node) *ast.SourceFile {
+	if tc.sourceFile == nil || tc.sourceFiles == nil {
+		return nil
+	}
+
+	var moduleSpecifier *ast.Node
+	switch importOrExport.Kind {
+	case ast.KindImportDeclaration:
+		moduleSpecifier = importOrExport.AsImportDeclaration().ModuleSpecifier
+	case ast.KindExportDeclaration:
+		moduleSpecifier = importOrExport.AsExportDeclaration().ModuleSpecifier
+	default:
+		return nil
+	}
+
+	if moduleSpecifier == nil || !ast.IsStringLiteral(moduleSpecifier) {
+		return nil
+	}
+
+	specText := moduleSpecifier.AsStringLiteral().Text
+
+	// The import is relative to the current source file's directory
+	importingDir := tc.sourceFile.FileName()
+	// Get directory of the importing file
+	lastSlash := -1
+	for i := len(importingDir) - 1; i >= 0; i-- {
+		if importingDir[i] == '/' {
+			lastSlash = i
+			break
+		}
+	}
+	if lastSlash >= 0 {
+		importingDir = importingDir[:lastSlash]
+	}
+
+	// Try to resolve: specText relative to importingDir, with extensions
+	// e.g. "./types" → "/types.d.ts" or "/types.ts" or "/types.tsx"
+	// Also try specText + "/index.d.ts" etc.
+	candidates := []string{}
+	normalizedSpec := specText
+	if len(normalizedSpec) >= 2 && normalizedSpec[0] == '.' && normalizedSpec[1] == '/' {
+		normalizedSpec = normalizedSpec[2:]
+	}
+
+	// Resolve relative to importing dir
+	var basePath string
+	if normalizedSpec[0] == '/' {
+		basePath = normalizedSpec
+	} else {
+		basePath = importingDir + "/" + normalizedSpec
+	}
+
+	// Try various extensions
+	for _, ext := range []string{".ts", ".d.ts", ".tsx", ".mts", ".cts"} {
+		candidates = append(candidates, basePath+ext)
+	}
+	// Also try /index files
+	for _, ext := range []string{".ts", ".d.ts", ".tsx"} {
+		candidates = append(candidates, basePath+"/index"+ext)
+	}
+
+	allFiles := tc.sourceFiles()
+	for _, sf := range allFiles {
+		fileName := sf.FileName()
+		for _, candidate := range candidates {
+			if fileName == candidate {
+				return sf
+			}
+		}
+	}
+
+	return nil
+}
+
+// findDeclarationInFile looks up a name in a source file's locals (binder symbol table).
+func (tc *typeCompiler) findDeclarationInFile(sourceFile *ast.SourceFile, declarationName string) *ast.Node {
+	if sourceFile == nil || sourceFile.AsNode().LocalsContainerData() == nil {
+		return nil
+	}
+	locals := ast.GetLocals(sourceFile.AsNode())
+	if locals == nil {
+		return nil
+	}
+	sym, ok := locals[declarationName]
+	if !ok || sym == nil || len(sym.Declarations) == 0 {
+		return nil
+	}
+	return sym.Declarations[0]
+}
+
+// followExport follows an export declaration to find the actual declaration,
+// potentially recursing through re-exports.
+func (tc *typeCompiler) followExport(declarationName string, exportDecl *ast.Node, sourceFile *ast.SourceFile) *ast.Node {
+	decl := exportDecl.AsExportDeclaration()
+	if decl.ExportClause != nil {
+		if decl.ExportClause.Kind == ast.KindNamedExports {
+			namedExports := decl.ExportClause.AsNamedExports()
+			if namedExports.Elements != nil {
+				for _, element := range namedExports.Elements.Nodes {
+					spec := element.AsExportSpecifier()
+					exportedName := spec.Name().AsIdentifier().Text
+					if exportedName != declarationName {
+						continue
+					}
+					// Found the export specifier for our name
+					if decl.ModuleSpecifier == nil || !ast.IsStringLiteral(decl.ModuleSpecifier) {
+						// It's `export { Class };` — Class is local or import
+						// Look in source file locals
+						localName := exportedName
+						if spec.PropertyName != nil {
+							localName = spec.PropertyName.AsIdentifier().Text
+						}
+						if sourceFile.AsNode().LocalsContainerData() != nil {
+							locals := ast.GetLocals(sourceFile.AsNode())
+							if locals != nil {
+								if sym, ok := locals[localName]; ok && sym != nil && len(sym.Declarations) > 0 {
+									found := sym.Declarations[0]
+									if found.Kind != ast.KindImportSpecifier {
+										return found
+									}
+									// It's an import — resolve cross-file
+									impDecl := findImportDeclaration(found)
+									return tc.resolveImportSpecifier(localName, impDecl)
+								}
+							}
+						}
+						return nil
+					}
+					// It's `export { x } from 'module'` — recurse
+					originalName := exportedName
+					if spec.PropertyName != nil {
+						originalName = spec.PropertyName.AsIdentifier().Text
+					}
+					return tc.resolveImportSpecifier(originalName, exportDecl)
+				}
+			}
+		}
+	} else {
+		// `export * from 'x'` — resolve through
+		return tc.resolveImportSpecifier(declarationName, exportDecl)
+	}
+	return nil
+}
+
+// shouldReExportOmegaSymbol determines whether a named re-export should include
+// the corresponding __Ω symbol. Only type declarations (interface, type alias, enum)
+// get __Ω re-exports — classes use static __type instead.
+func (tc *typeCompiler) shouldReExportOmegaSymbol(originalName string, exportDecl *ast.Node) bool {
+	resolvedDecl := tc.resolveImportSpecifier(originalName, exportDecl)
+	if resolvedDecl == nil {
+		return false
+	}
+
+	// Check if the resolved declaration is a type that generates __Ω
+	switch resolvedDecl.Kind {
+	case ast.KindInterfaceDeclaration, ast.KindTypeAliasDeclaration, ast.KindEnumDeclaration:
+		return true
+	default:
+		return false
+	}
 }

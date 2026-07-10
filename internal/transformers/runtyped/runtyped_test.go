@@ -121,10 +121,12 @@ type Bar = number;`,
 			output: "import { User, Post } from './models';\nimport { __ΩUser, __ΩPost } from './models';",
 		},
 		// ─── Re-exports ───
+		// Single-file: without cross-file resolution (no EmitResolver/SourceFiles),
+		// shouldReExportOmegaSymbol returns false, so no __Ω re-export is added.
 		{
 			title:  "ReExport",
 			input:  "export { User } from './models';",
-			output: "export { User } from './models';\nexport { __ΩUser as __ΩUser } from './models';",
+			output: "export { User } from './models';",
 		},
 		// ─── Combined scenarios ───
 		{
@@ -216,10 +218,11 @@ class Service {
 import { __ΩUser } from './models';`,
 		},
 		// ─── Re-exports: original re-export kept (import elision is a separate transformer) ───
+		// Single-file: no __Ω re-export without cross-file resolution.
 		{
 			title:  "ReExportSurvives",
 			input:  "export { User } from './models';",
-			output: "export { User } from './models';\nexport { __ΩUser as __ΩUser } from './models';",
+			output: "export { User } from './models';",
 		},
 	}
 

@@ -14,6 +14,8 @@ func NewReflectionTransformer(opt *transformers.TransformOptions) *transformers.
 	tx := &reflectionTransformer{
 		compilerOptions: opt.CompilerOptions,
 		emitContext:     opt.Context,
+		emitResolver:    opt.EmitResolver,
+		sourceFiles:     opt.SourceFiles,
 	}
 	return tx.NewTransformer(tx.visit, opt.Context)
 }
@@ -22,6 +24,8 @@ type reflectionTransformer struct {
 	transformers.Transformer
 	compilerOptions *core.CompilerOptions
 	emitContext     *printer.EmitContext
+	emitResolver    printer.EmitResolver
+	sourceFiles     func() []*ast.SourceFile
 
 	// Per-file state
 	sourceFile *ast.SourceFile
@@ -70,6 +74,12 @@ func (tx *reflectionTransformer) visit(node *ast.Node) *ast.Node {
 	case ast.KindArrowFunction:
 		return tx.visitArrowFunction(node)
 
+	case ast.KindCallExpression:
+		return tx.visitCallExpression(node.AsCallExpression())
+
+	case ast.KindNewExpression:
+		return tx.visitNewExpression(node.AsNewExpression())
+
 	default:
 		return tx.Visitor().VisitEachChild(node)
 	}
@@ -88,7 +98,7 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	tx.additionalImports = nil
 	tx.additionalReExports = nil
 	tx.sourceFile = node
-	tx.tc = newTypeCompiler(tx.Factory())
+	tx.tc = newTypeCompiler(tx.Factory(), tx.emitResolver, tx.sourceFiles)
 	tx.tc.sourceFile = node
 
 	// Visit all children (which collects omegaStatements, additionalImports, etc.)
@@ -428,6 +438,87 @@ func (tx *reflectionTransformer) serializeEntityNameAsExpression(name *ast.Node)
 	return tx.Factory().NewIdentifier("undefined")
 }
 
+// ─── Call/New Expressions (type argument passing) ───
+
+// visitCallExpression handles calls with type arguments:
+// - typeOf<T>() → typeOf(__ΩT) (auto-type functions inline the type as an argument)
+// - fn<T>() → fn.Ω = [type]; fn() (Ω side-channel for ReceiveType)
+// Currently only auto-type functions (typeOf, valuesOf, propertiesOf) are implemented.
+func (tx *reflectionTransformer) visitCallExpression(node *ast.CallExpression) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsCallExpression()
+
+	// Only handle calls with type arguments
+	if visited.TypeArguments == nil || len(visited.TypeArguments.Nodes) == 0 {
+		return visited.AsNode()
+	}
+
+	// Check for auto-type functions: typeOf, valuesOf, propertiesOf
+	if visited.Expression != nil && visited.Expression.Kind == ast.KindIdentifier {
+		fnName := visited.Expression.AsIdentifier().Text
+		if fnName == "typeOf" || fnName == "valuesOf" || fnName == "propertiesOf" {
+			return tx.handleAutoTypeFunction(visited.AsNode(), false)
+		}
+	}
+
+	// TODO: Ω side-channel for generic calls (fn<T>() → fn.Ω = [type])
+	// and optional chain transforms — deferred to a later phase
+	return visited.AsNode()
+}
+
+// visitNewExpression handles `new Foo<T>()` with type arguments.
+func (tx *reflectionTransformer) visitNewExpression(node *ast.NewExpression) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsNewExpression()
+
+	// Only handle with type arguments
+	if visited.TypeArguments == nil || len(visited.TypeArguments.Nodes) == 0 {
+		return visited.AsNode()
+	}
+
+	// TODO: Ω side-channel for generic constructor calls — deferred
+	return visited.AsNode()
+}
+
+// handleAutoTypeFunction transforms typeOf<T>() → typeOf(__ΩT)
+// by resolving the type argument to its encoded form and appending it as a regular argument.
+func (tx *reflectionTransformer) handleAutoTypeFunction(node *ast.Node, isNew bool) *ast.Node {
+	call := node.AsCallExpression()
+	typeArg := call.TypeArguments.Nodes[0]
+
+	// Resolve the type to an encoded expression
+	typeExpr := tx.tc.getTypeOfType(typeArg)
+	if typeExpr == nil {
+		typeExpr = tx.Factory().NewIdentifier("undefined")
+	}
+
+	// Build new arguments: existing args + type expression
+	var args []*ast.Node
+	if call.Arguments != nil {
+		args = append(args, call.Arguments.Nodes...)
+	}
+	// If no existing args, push an empty array as placeholder (matching TS behavior)
+	if len(args) == 0 {
+		args = append(args, tx.Factory().NewArrayLiteralExpression(tx.Factory().NewNodeList(nil), false))
+	}
+	args = append(args, typeExpr)
+
+	if isNew {
+		newExpr := node.AsNewExpression()
+		return tx.Factory().NewNewExpression(
+			newExpr.Expression,
+			newExpr.TypeArguments,
+			tx.Factory().NewNodeList(args),
+		)
+	}
+
+	return tx.Factory().NewCallExpression(
+		call.Expression,
+		nil, // questionDotToken
+		call.TypeArguments,
+		tx.Factory().NewNodeList(args),
+		call.Flags,
+	)
+}
+
 // ─── Imports ───
 
 func (tx *reflectionTransformer) visitImportDeclaration(node *ast.ImportDeclaration) *ast.Node {
@@ -490,17 +581,26 @@ func (tx *reflectionTransformer) visitExportDeclaration(node *ast.ExportDeclarat
 		return visited.AsNode()
 	}
 
-	// For each exported name, add __Ω{name} re-export from the same module
-	// For aliased exports (export { User as MyUser }), produce: export { __ΩUser as __ΩMyUser }
+	// For each exported name, check if the resolved symbol is a type that
+	// generates __Ω (interface, type alias, enum). Classes do NOT get __Ω
+	// re-exports — they use static __type. Value exports don't either.
 	var omegaSpecifiers []*ast.Node
 	for _, spec := range namedExports.Elements.Nodes {
 		specNode := spec.AsExportSpecifier()
 		exportedName := specNode.Name().AsIdentifier().Text
-		omegaExportedName := tx.Factory().NewIdentifier("__Ω" + exportedName)
+		originalName := exportedName
+		if specNode.PropertyName != nil {
+			originalName = specNode.PropertyName.AsIdentifier().Text
+		}
 
+		// Check if this symbol should get a __Ω re-export
+		if !tx.tc.shouldReExportOmegaSymbol(originalName, visited.AsNode()) {
+			continue
+		}
+
+		omegaExportedName := tx.Factory().NewIdentifier("__Ω" + exportedName)
 		var omegaPropertyName *ast.Node
 		if specNode.PropertyName != nil {
-			originalName := specNode.PropertyName.AsIdentifier().Text
 			omegaPropertyName = tx.Factory().NewIdentifier("__Ω" + originalName)
 		} else {
 			omegaPropertyName = omegaExportedName

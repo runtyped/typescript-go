@@ -133,6 +133,7 @@ func getScriptTransformers(emitContext *printer.EmitContext, host printer.EmitHo
 		Resolver:                  referenceResolver,
 		EmitResolver:              emitResolver,
 		GetEmitModuleFormatOfFile: host.GetEmitModuleFormatOfFile,
+		SourceFiles:                host.SourceFiles,
 	}
 
 	// Runtyped reflection transformer — must run BEFORE type erasure

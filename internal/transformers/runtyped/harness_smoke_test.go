@@ -168,7 +168,6 @@ func TestNamedReExportMultiFile(t *testing.T) {
 	// to determine whether the exported symbol is a type (interface/type alias/enum)
 	// or a value. Deferred until cross-file resolution is implemented.
 	t.Run("NamedReExportNoOp", func(t *testing.T) {
-		t.Skip("requires shouldReExportOmegaSymbol (cross-file resolution)")
 		outputs := compile(t, map[string]string{
 			"app.ts":     "import { config } from './index';",
 			"index.ts":   "export { config } from './config';",
@@ -180,5 +179,147 @@ func TestNamedReExportMultiFile(t *testing.T) {
 		}
 		t.Logf("index.js:\n%s", indexJS)
 		assertNotContains(t, indexJS, "__Ω")
+	})
+}
+
+// Port of transform.spec.ts tests that require cross-file type resolution.
+// These use the multi-file harness so the EmitResolver can resolve imports
+// to actual declarations in other source files.
+func TestCrossFileResolution(t *testing.T) {
+	t.Parallel()
+
+	compilerOptions := &core.CompilerOptions{
+		Module:           core.ModuleKindCommonJS,
+		ModuleResolution: core.ModuleResolutionKindNode10,
+		Target:           core.ScriptTargetES2016,
+	}
+
+	compile := func(t *testing.T, files map[string]string) map[string]string {
+		t.Helper()
+		var inputFiles []*harnessutil.TestFile
+		var fileNames []string
+		for name, content := range files {
+			inputFiles = append(inputFiles, &harnessutil.TestFile{UnitName: name, Content: content})
+			fileNames = append(fileNames, "/"+name)
+		}
+		result := harnessutil.CompileFiles(t,
+			inputFiles,
+			nil,
+			harnessutil.TestConfiguration{},
+			&tsoptions.ParsedCommandLine{
+				ParsedConfig: &core.ParsedOptions{
+					CompilerOptions: compilerOptions,
+					FileNames:       fileNames,
+				},
+			},
+			"/",
+			nil,
+		)
+		outputs := make(map[string]string)
+		result.JS.Entries()(func(key string, value *harnessutil.TestFile) bool {
+			outputs[key] = value.Content
+			return true
+		})
+		return outputs
+	}
+
+	// "resolve import ts" — import a class from another .ts file
+	t.Run("ResolveImportTS", func(t *testing.T) {
+		t.Parallel()
+		outputs := compile(t, map[string]string{
+			"app.ts":    "import { Logger } from './logger';\nfunction fn(logger: Logger) {}",
+			"logger.ts": "export class Logger {}",
+		})
+		appJS, ok := outputs["/app.js"]
+		if !ok {
+			t.Fatal("no app.js output")
+		}
+		t.Logf("app.js:\n%s", appJS)
+		assertContains(t, appJS, "Logger")
+		assertContains(t, appJS, "__type")
+
+		loggerJS, ok := outputs["/logger.js"]
+		if !ok {
+			t.Fatal("no logger.js output")
+		}
+		t.Logf("logger.js:\n%s", loggerJS)
+		assertContains(t, loggerJS, "__type")
+	})
+
+	// "resolve import d.ts" — import a class from a .d.ts file
+	t.Run("ResolveImportDTS", func(t *testing.T) {
+		t.Parallel()
+		outputs := compile(t, map[string]string{
+			"app.ts":       "import { Logger } from './logger';\nfunction fn(logger: Logger) {}",
+			"logger.d.ts":  "export declare class Logger {}",
+		})
+		appJS, ok := outputs["/app.js"]
+		if !ok {
+			t.Fatal("no app.js output")
+		}
+		t.Logf("app.js:\n%s", appJS)
+		assertContains(t, appJS, "Logger")
+		assertContains(t, appJS, "__type")
+	})
+
+	// "declaration file" — import from .d.ts with explicit __Ω type
+	t.Run("DeclarationFile", func(t *testing.T) {
+		t.Parallel()
+		outputs := compile(t, map[string]string{
+			"app.ts": "import { T } from './types';\ntypeOf<T>();",
+			"types.d.ts": "export type T = string;\nexport type __ΩT = any[];",
+		})
+		appJS, ok := outputs["/app.js"]
+		if !ok {
+			t.Fatal("no app.js output")
+		}
+		t.Logf("app.js:\n%s", appJS)
+		assertContains(t, appJS, "__ΩT")
+	})
+
+	// "import typeOnly interface" — type-only import from .d.ts
+	t.Run("ImportTypeOnlyInterface", func(t *testing.T) {
+		t.Parallel()
+		outputs := compile(t, map[string]string{
+			"app.ts":      "import type { Cache } from './module';\ntypeOf<Cache>();",
+			"module.d.ts": "export interface Cache {}",
+		})
+		appJS, ok := outputs["/app.js"]
+		if !ok {
+			t.Fatal("no app.js output")
+		}
+		t.Logf("app.js:\n%s", appJS)
+		assertContains(t, appJS, "Cache")
+	})
+
+	// "import typeOnly class" — type-only import from .d.ts (class)
+	t.Run("ImportTypeOnlyClass", func(t *testing.T) {
+		t.Parallel()
+		outputs := compile(t, map[string]string{
+			"app.ts":      "import type { Cache } from './module';\ntypeOf<Cache>();",
+			"module.d.ts": "export declare class Cache {}",
+		})
+		appJS, ok := outputs["/app.js"]
+		if !ok {
+			t.Fatal("no app.js output")
+		}
+		t.Logf("app.js:\n%s", appJS)
+		assertContains(t, appJS, "Cache")
+	})
+
+	// "reexport existing" — re-export of imported class
+	t.Run("ReExportExisting", func(t *testing.T) {
+		t.Parallel()
+		outputs := compile(t, map[string]string{
+			"app.ts":     "import { Cache } from './module';\ntypeOf<Cache>();",
+			"module.ts":  "import { Cache } from './class';\nexport { Cache }",
+			"class.ts":   "export class Cache {}",
+		})
+		appJS, ok := outputs["/app.js"]
+		if !ok {
+			t.Fatal("no app.js output")
+		}
+		t.Logf("app.js:\n%s", appJS)
+		assertContains(t, appJS, "Cache")
 	})
 }
