@@ -323,3 +323,79 @@ func TestCrossFileResolution(t *testing.T) {
 		assertContains(t, appJS, "Cache")
 	})
 }
+
+// ─── ReceiveType tests (require binder/locals) ───
+
+func TestReceiveTypePassing(t *testing.T) {
+	inputFiles := []*harnessutil.TestFile{
+		{UnitName: "app.ts", Content: `function getType<T>(type?: ReceiveType<T>) {
+}
+
+getType<string>();`},
+	}
+
+	result := harnessutil.CompileFiles(t,
+		inputFiles,
+		nil,
+		harnessutil.TestConfiguration{},
+		&tsoptions.ParsedCommandLine{
+			ParsedConfig: &core.ParsedOptions{
+				CompilerOptions: &core.CompilerOptions{
+					Module:           core.ModuleKindCommonJS,
+					ModuleResolution: core.ModuleResolutionKindNode10,
+					Target:           core.ScriptTargetES2016,
+				},
+				FileNames: []string{"/app.ts"},
+			},
+		},
+		"/",
+		nil,
+	)
+
+	appJS := result.JS.GetOrZero("/app.js")
+	if appJS == nil {
+		t.Fatal("no app.js output")
+	}
+	t.Logf("app.js output:\n%s", appJS.Content)
+
+	// Direct passing: type arg is passed as a function argument
+	// Note: type arguments are stripped in emit, so getType<string>([...]) becomes getType([...])
+	if !strings.Contains(appJS.Content, "getType([") {
+		t.Errorf("expected direct passing: getType([")
+	}
+	// No Ω side-channel at call site
+	if strings.Contains(appJS.Content, "getType.Ω = [") {
+		t.Errorf("should not have Ω side-channel")
+	}
+}
+
+func TestReceiveTypeArrowFunction(t *testing.T) {
+	inputFiles := []*harnessutil.TestFile{
+		{UnitName: "app.ts", Content: `(<T>(type?: ReceiveType<T>) => {})<string>();`},
+	}
+
+	result := harnessutil.CompileFiles(t,
+		inputFiles,
+		nil,
+		harnessutil.TestConfiguration{},
+		&tsoptions.ParsedCommandLine{
+			ParsedConfig: &core.ParsedOptions{
+				CompilerOptions: &core.CompilerOptions{
+					Module:           core.ModuleKindCommonJS,
+					ModuleResolution: core.ModuleResolutionKindNode10,
+					Target:           core.ScriptTargetES2016,
+				},
+				FileNames: []string{"/app.ts"},
+			},
+		},
+		"/",
+		nil,
+	)
+
+	appJS := result.JS.GetOrZero("/app.js")
+	if appJS == nil {
+		t.Fatal("no app.js output")
+	}
+	t.Logf("app.js output:\n%s", appJS.Content)
+	// Arrow function inline calls are excluded from type passing — just make sure it compiles
+}

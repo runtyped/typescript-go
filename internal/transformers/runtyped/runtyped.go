@@ -1,6 +1,8 @@
 package runtyped
 
 import (
+	"strconv"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/printer"
@@ -73,6 +75,9 @@ func (tx *reflectionTransformer) visit(node *ast.Node) *ast.Node {
 
 	case ast.KindArrowFunction:
 		return tx.visitArrowFunction(node)
+
+	case ast.KindParameter:
+		return tx.visitParameterDeclaration(node.AsParameterDeclaration())
 
 	case ast.KindCallExpression:
 		return tx.visitCallExpression(node.AsCallExpression())
@@ -321,6 +326,9 @@ func (tx *reflectionTransformer) visitEnumDeclaration(node *ast.EnumDeclaration)
 func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node).AsFunctionDeclaration()
 
+	// Inject Ω reset if function has ReceiveType params
+	visited = tx.injectResetOmega(visited.AsNode()).AsFunctionDeclaration()
+
 	encodedType := tx.tc.getTypeOfFunction(node)
 	if encodedType == nil {
 		return visited.AsNode()
@@ -368,6 +376,9 @@ func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.N
 func (tx *reflectionTransformer) visitFunctionExpression(node *ast.Node) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node).AsFunctionExpression()
 
+	// Inject Ω reset if function has ReceiveType params
+	visited = tx.injectResetOmega(visited.AsNode()).AsFunctionExpression()
+
 	encodedType := tx.tc.getTypeOfFunction(node)
 	if encodedType == nil {
 		return visited.AsNode()
@@ -379,6 +390,9 @@ func (tx *reflectionTransformer) visitFunctionExpression(node *ast.Node) *ast.No
 
 func (tx *reflectionTransformer) visitArrowFunction(node *ast.Node) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node).AsArrowFunction()
+
+	// Inject Ω reset if function has ReceiveType params
+	visited = tx.injectResetOmega(visited.AsNode()).AsArrowFunction()
 
 	encodedType := tx.tc.getTypeOfFunction(node)
 	if encodedType == nil {
@@ -415,6 +429,288 @@ func (tx *reflectionTransformer) createFunctionExpressionFromDeclaration(decl *a
 	)
 }
 
+// injectResetOmega prepends `fn.Ω = undefined` (or appropriate container) to the
+// function body if the function has ReceiveType<T> parameters.
+func (tx *reflectionTransformer) injectResetOmega(node *ast.Node) *ast.Node {
+	var parameters []*ast.Node
+	var body *ast.Node
+	var name *ast.Node
+
+	switch node.Kind {
+	case ast.KindFunctionDeclaration:
+		fd := node.AsFunctionDeclaration()
+		parameters = fd.Parameters.Nodes
+		body = fd.Body
+		name = fd.Name()
+	case ast.KindFunctionExpression:
+		fe := node.AsFunctionExpression()
+		parameters = fe.Parameters.Nodes
+		body = fe.Body
+		name = fe.Name()
+	case ast.KindArrowFunction:
+		af := node.AsArrowFunction()
+		parameters = af.Parameters.Nodes
+		body = af.Body
+		name = nil // Arrow functions get their name from variable declaration parent
+	case ast.KindMethodDeclaration:
+		md := node.AsMethodDeclaration()
+		parameters = md.Parameters.Nodes
+		body = md.Body
+		name = md.Name()
+	case ast.KindConstructor:
+		cd := node.AsConstructorDeclaration()
+		parameters = cd.Parameters.Nodes
+		body = cd.Body
+		name = nil
+	default:
+		return node
+	}
+
+	if !hasReceiveTypeParameter(parameters) {
+		return node
+	}
+	if body == nil || body.Kind != ast.KindBlock {
+		return node
+	}
+
+	// Build the container expression for Ω reset
+	var container *ast.Node
+	factory := tx.Factory()
+
+	switch node.Kind {
+	case ast.KindArrowFunction:
+		// For arrow functions, the container comes from the parent variable declaration
+		// e.g. const fn = <T>(type: ReceiveType<T>) => {} → fn.Ω = undefined
+		// If parent is not a VariableDeclaration, we can't set Ω
+		parent := node.Parent
+		if parent != nil && parent.Kind == ast.KindVariableDeclaration {
+			varDecl := parent.AsVariableDeclaration()
+			if varDecl.Name() != nil && varDecl.Name().Kind == ast.KindIdentifier {
+				container = factory.NewIdentifier(varDecl.Name().AsIdentifier().Text)
+			}
+		}
+		if container == nil {
+			return node
+		}
+	case ast.KindFunctionDeclaration, ast.KindFunctionExpression:
+		if name != nil && name.Kind == ast.KindIdentifier {
+			container = factory.NewIdentifier(name.AsIdentifier().Text)
+		}
+		if container == nil {
+			container = factory.NewIdentifier("globalThis")
+		}
+	case ast.KindMethodDeclaration:
+		if name != nil && name.Kind == ast.KindIdentifier {
+			container = factory.NewPropertyAccessExpression(
+				factory.NewIdentifier("this"), nil, factory.NewIdentifier(name.AsIdentifier().Text), 0)
+		}
+	case ast.KindConstructor:
+		container = factory.NewPropertyAccessExpression(
+			factory.NewIdentifier("this"), nil, factory.NewIdentifier("constructor"), 0)
+	}
+
+	if container == nil {
+		container = factory.NewIdentifier("globalThis")
+	}
+
+	// Build: container.Ω = undefined
+	resetStmt := factory.NewExpressionStatement(
+		factory.NewBinaryExpression(nil,
+			factory.NewPropertyAccessExpression(container, nil, factory.NewIdentifier("Ω"), 0),
+			nil,
+			factory.NewToken(ast.KindEqualsToken),
+			factory.NewIdentifier("undefined"),
+		))
+
+	// Prepend reset statement to body
+	block := body.AsBlock()
+	newStatements := append([]*ast.Node{resetStmt}, block.Statements.Nodes...)
+	newBody := factory.NewBlock(factory.NewNodeList(newStatements), false)
+
+	// Rebuild the node with new body
+	switch node.Kind {
+	case ast.KindFunctionDeclaration:
+		fd := node.AsFunctionDeclaration()
+		return factory.NewFunctionDeclaration(
+			fd.Modifiers(), fd.AsteriskToken, fd.Name(), fd.TypeParameters, fd.Parameters, fd.Type, fd.FullSignature, newBody)
+	case ast.KindFunctionExpression:
+		fe := node.AsFunctionExpression()
+		return factory.NewFunctionExpression(
+			fe.Modifiers(), fe.AsteriskToken, fe.Name(), fe.TypeParameters, fe.Parameters, fe.Type, fe.FullSignature, newBody)
+	case ast.KindArrowFunction:
+		af := node.AsArrowFunction()
+		return factory.NewArrowFunction(
+			af.Modifiers(), af.TypeParameters, af.Parameters, af.Type, af.FullSignature, af.EqualsGreaterThanToken, newBody)
+	case ast.KindMethodDeclaration:
+		md := node.AsMethodDeclaration()
+		return factory.NewMethodDeclaration(
+			md.Modifiers(), md.AsteriskToken, md.Name(), md.PostfixToken, md.TypeParameters, md.Parameters, md.Type, md.FullSignature, newBody)
+	case ast.KindConstructor:
+		cd := node.AsConstructorDeclaration()
+		return factory.NewConstructorDeclaration(cd.Modifiers(), cd.TypeParameters, cd.Parameters, cd.Type, cd.FullSignature, newBody)
+	}
+
+	return node
+}
+
+// getTypeParametersOfFunctionLike extracts type parameters from any function-like node.
+func getTypeParametersOfFunctionLike(node *ast.Node) *ast.NodeList {
+	if node == nil {
+		return nil
+	}
+	switch node.Kind {
+	case ast.KindFunctionDeclaration:
+		return node.AsFunctionDeclaration().TypeParameters
+	case ast.KindFunctionExpression:
+		return node.AsFunctionExpression().TypeParameters
+	case ast.KindArrowFunction:
+		return node.AsArrowFunction().TypeParameters
+	case ast.KindMethodDeclaration:
+		return node.AsMethodDeclaration().TypeParameters
+	case ast.KindConstructor:
+		return nil // Constructor type params come from the class
+	}
+	return nil
+}
+
+// getFunctionLikeName extracts the name from a function-like node.
+func getFunctionLikeName(node *ast.Node) *ast.Node {
+	if node == nil {
+		return nil
+	}
+	switch node.Kind {
+	case ast.KindFunctionDeclaration:
+		return node.AsFunctionDeclaration().Name()
+	case ast.KindFunctionExpression:
+		return node.AsFunctionExpression().Name()
+	case ast.KindMethodDeclaration:
+		return node.AsMethodDeclaration().Name()
+	}
+	return nil
+}
+
+// visitParameterDeclaration handles ReceiveType<T> parameters by adding a default
+// value that reads from the function's Ω property.
+func (tx *reflectionTransformer) visitParameterDeclaration(node *ast.ParameterDeclaration) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsParameterDeclaration()
+
+	if visited.Type == nil {
+		return visited.AsNode()
+	}
+
+	receiveType := getReceiveTypeParameter(visited.Type)
+	if receiveType == nil {
+		return visited.AsNode()
+	}
+
+	// Get the type parameter name from ReceiveType<T>
+	typeRef := receiveType.AsTypeReferenceNode()
+	if typeRef.TypeArguments == nil || len(typeRef.TypeArguments.Nodes) == 0 {
+		return visited.AsNode()
+	}
+	first := typeRef.TypeArguments.Nodes[0]
+	if first.Kind != ast.KindTypeReference {
+		return visited.AsNode()
+	}
+	firstRef := first.AsTypeReferenceNode()
+	if firstRef.TypeName.Kind != ast.KindIdentifier {
+		return visited.AsNode()
+	}
+	typeParamName := firstRef.TypeName.AsIdentifier().Text
+
+	// Find the parent function to get type parameters
+	parent := visited.Parent
+	if parent == nil {
+		return visited.AsNode()
+	}
+
+	var typeParameters *ast.NodeList
+	switch parent.Kind {
+	case ast.KindConstructor:
+		// Constructor's type params are on the class
+		classNode := parent.Parent
+		if classNode != nil && (classNode.Kind == ast.KindClassDeclaration || classNode.Kind == ast.KindClassExpression) {
+			typeParameters = classNode.ClassLikeData().TypeParameters
+		}
+	default:
+		// Function/Method/Arrow — type params are on the parent
+		typeParameters = getTypeParametersOfFunctionLike(parent)
+	}
+
+	if typeParameters == nil || len(typeParameters.Nodes) == 0 {
+		return visited.AsNode()
+	}
+
+	// Find the type parameter index
+	typeParamIdx := -1
+	for i, tp := range typeParameters.Nodes {
+		tpDecl := tp.AsTypeParameterDeclaration()
+		if tpDecl.Name() != nil && tpDecl.Name().Kind == ast.KindIdentifier &&
+			tpDecl.Name().AsIdentifier().Text == typeParamName {
+			typeParamIdx = i
+			break
+		}
+	}
+	if typeParamIdx == -1 {
+		return visited.AsNode()
+	}
+
+	// Build the container expression
+	var container *ast.Node
+	factory := tx.Factory()
+
+	switch parent.Kind {
+	case ast.KindArrowFunction:
+		// Arrow function: container is the variable name from parent declaration
+		varDecl := parent.Parent
+		if varDecl != nil && varDecl.Kind == ast.KindVariableDeclaration {
+			if varDecl.AsVariableDeclaration().Name() != nil && varDecl.AsVariableDeclaration().Name().Kind == ast.KindIdentifier {
+				container = factory.NewIdentifier(varDecl.AsVariableDeclaration().Name().AsIdentifier().Text)
+			}
+		}
+		if container == nil {
+			return visited.AsNode()
+		}
+	case ast.KindFunctionDeclaration, ast.KindFunctionExpression:
+		fnName := getFunctionLikeName(parent)
+		if fnName != nil && fnName.Kind == ast.KindIdentifier {
+			container = factory.NewIdentifier(fnName.AsIdentifier().Text)
+		}
+		if container == nil {
+			container = factory.NewIdentifier("globalThis")
+		}
+	case ast.KindMethodDeclaration:
+		if parent.AsMethodDeclaration().Name() != nil && parent.AsMethodDeclaration().Name().Kind == ast.KindIdentifier {
+			container = factory.NewPropertyAccessExpression(
+				factory.NewIdentifier("this"), nil, factory.NewIdentifier(parent.AsMethodDeclaration().Name().AsIdentifier().Text), 0)
+		}
+	case ast.KindConstructor:
+		container = factory.NewPropertyAccessExpression(
+			factory.NewIdentifier("this"), nil, factory.NewIdentifier("constructor"), 0)
+	default:
+		container = factory.NewIdentifier("globalThis")
+	}
+
+	// For single type param: read Ω directly. For multiple: Ω?.[index]
+	var defaultValue *ast.Node
+	omegaAccess := factory.NewPropertyAccessExpression(container, nil, factory.NewIdentifier("Ω"), 0)
+	if len(typeParameters.Nodes) == 1 {
+		defaultValue = omegaAccess
+	} else {
+		defaultValue = factory.NewElementAccessExpression(omegaAccess, factory.NewToken(ast.KindQuestionDotToken), factory.NewNumericLiteral(strconv.Itoa(typeParamIdx), ast.TokenFlagsNone), 0)
+	}
+
+	// Rebuild the parameter with the default value
+	return factory.NewParameterDeclaration(
+		visited.Modifiers(),
+		visited.DotDotDotToken,
+		visited.Name(),
+		visited.QuestionToken,
+		receiveType, // type stays as ReceiveType<T> (will be erased)
+		defaultValue,
+	)
+}
+
 func (tx *reflectionTransformer) wrapWithAssignType(fn *ast.Node, typeExpr *ast.Node) *ast.Node {
 	return tx.Factory().NewCallExpression(
 		tx.Factory().NewIdentifier("__assignType"),
@@ -445,6 +741,20 @@ func (tx *reflectionTransformer) serializeEntityNameAsExpression(name *ast.Node)
 // - fn<T>() → fn.Ω = [type]; fn() (Ω side-channel for ReceiveType)
 // Currently only auto-type functions (typeOf, valuesOf, propertiesOf) are implemented.
 func (tx *reflectionTransformer) visitCallExpression(node *ast.CallExpression) *ast.Node {
+	// Resolve ReceiveType info from the ORIGINAL node (before visiting, parent chain intact)
+	var callResult *CallReceiveTypeResult
+	if node.AsCallExpression().TypeArguments != nil && len(node.AsCallExpression().TypeArguments.Nodes) > 0 {
+		// Check for auto-type functions: typeOf, valuesOf, propertiesOf
+		if node.Expression != nil && node.Expression.Kind == ast.KindIdentifier {
+			fnName := node.Expression.AsIdentifier().Text
+			if fnName == "typeOf" || fnName == "valuesOf" || fnName == "propertiesOf" {
+				visited := tx.Visitor().VisitEachChild(node.AsNode()).AsCallExpression()
+				return tx.handleAutoTypeFunction(visited.AsNode(), false)
+			}
+		}
+		callResult = tx.tc.resolveCallReceiveTypeInfo(node.AsNode())
+	}
+
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsCallExpression()
 
 	// Only handle calls with type arguments
@@ -452,30 +762,158 @@ func (tx *reflectionTransformer) visitCallExpression(node *ast.CallExpression) *
 		return visited.AsNode()
 	}
 
-	// Check for auto-type functions: typeOf, valuesOf, propertiesOf
-	if visited.Expression != nil && visited.Expression.Kind == ast.KindIdentifier {
-		fnName := visited.Expression.AsIdentifier().Text
-		if fnName == "typeOf" || fnName == "valuesOf" || fnName == "propertiesOf" {
-			return tx.handleAutoTypeFunction(visited.AsNode(), false)
-		}
-	}
-
-	// TODO: Ω side-channel for generic calls (fn<T>() → fn.Ω = [type])
-	// and optional chain transforms — deferred to a later phase
-	return visited.AsNode()
+	return tx.handleTypeArgumentCall(visited.AsNode(), false, callResult)
 }
 
 // visitNewExpression handles `new Foo<T>()` with type arguments.
 func (tx *reflectionTransformer) visitNewExpression(node *ast.NewExpression) *ast.Node {
+	// Resolve ReceiveType info from the ORIGINAL node
+	var callResult *CallReceiveTypeResult
+	if node.AsNewExpression().TypeArguments != nil && len(node.AsNewExpression().TypeArguments.Nodes) > 0 {
+		callResult = tx.tc.resolveCallReceiveTypeInfo(node.AsNode())
+	}
+
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsNewExpression()
 
-	// Only handle with type arguments
 	if visited.TypeArguments == nil || len(visited.TypeArguments.Nodes) == 0 {
 		return visited.AsNode()
 	}
 
-	// TODO: Ω side-channel for generic constructor calls — deferred
-	return visited.AsNode()
+	return tx.handleTypeArgumentCall(visited.AsNode(), true, callResult)
+}
+
+// handleTypeArgumentCall handles calls/new expressions with type arguments:
+// - Direct passing: if target has ReceiveType params, pass type as argument
+// - Ω side-channel: fn.Ω = [type]; fn() fallback
+func (tx *reflectionTransformer) handleTypeArgumentCall(node *ast.Node, isNew bool, callResult *CallReceiveTypeResult) *ast.Node {
+	factory := tx.Factory()
+
+	// Resolve type arguments to encoded expressions
+	var typeExpressions []*ast.Node
+	var typeArgs []*ast.Node
+	if isNew {
+		newExpr := node.AsNewExpression()
+		typeArgs = newExpr.TypeArguments.Nodes
+	} else {
+		callExpr := node.AsCallExpression()
+		typeArgs = callExpr.TypeArguments.Nodes
+	}
+
+	for _, a := range typeArgs {
+		typeExpr := tx.tc.getTypeOfType(a)
+		if typeExpr == nil {
+			typeExpr = factory.NewIdentifier("undefined")
+		}
+		typeExpressions = append(typeExpressions, typeExpr)
+	}
+
+	// Check if expression is an inline arrow function — skip type passing
+	var exprToCheck *ast.Node
+	if isNew {
+		exprToCheck = node.AsNewExpression().Expression
+	} else {
+		exprToCheck = node.AsCallExpression().Expression
+	}
+	checkExpr := getAssignTypeExpression(exprToCheck)
+	if checkExpr != nil {
+		exprToCheck = checkExpr
+	}
+	if exprToCheck != nil && exprToCheck.Kind == ast.KindArrowFunction {
+		// Inline arrow functions are excluded from type passing
+		return node
+	}
+
+	// Try direct argument passing: use pre-resolved call target ReceiveType info
+	if callResult != nil {
+		if callResult.Kind == "skip" {
+			// Resolved target has no ReceiveType params — skip type passing
+			return node
+		}
+		// Direct passing: place type args at correct parameter positions
+		var existingArgs []*ast.Node
+		if isNew {
+			if node.AsNewExpression().Arguments != nil {
+				existingArgs = node.AsNewExpression().Arguments.Nodes
+			}
+		} else {
+			if node.AsCallExpression().Arguments != nil {
+				existingArgs = node.AsCallExpression().Arguments.Nodes
+			}
+		}
+		newArgs := tx.tc.buildDirectPassingArgs(existingArgs, typeExpressions, callResult.Info)
+		if newArgs != nil {
+			if isNew {
+				newExpr := node.AsNewExpression()
+				return factory.NewNewExpression(
+					newExpr.Expression,
+					newExpr.TypeArguments,
+					factory.NewNodeList(newArgs),
+				)
+			}
+			callExpr := node.AsCallExpression()
+			return factory.NewCallExpression(
+				callExpr.Expression,
+				nil,
+				callExpr.TypeArguments,
+				factory.NewNodeList(newArgs),
+				callExpr.Flags,
+			)
+		}
+	}
+
+	// Fallback: Ω side-channel — fn.Ω = [types]; fn()
+	var fnExpr *ast.Node
+	if isNew {
+		fnExpr = node.AsNewExpression().Expression
+	} else {
+		fnExpr = node.AsCallExpression().Expression
+	}
+
+	// Build the packed type expression
+	var packedTypeExpr *ast.Node
+	if len(typeExpressions) == 1 {
+		packedTypeExpr = typeExpressions[0]
+	} else {
+		packedTypeExpr = factory.NewArrayLiteralExpression(factory.NewNodeList(typeExpressions), false)
+	}
+
+	// fn.Ω = packedTypeExpr
+	omegaAssign := factory.NewBinaryExpression(nil,
+		factory.NewPropertyAccessExpression(fnExpr, nil, factory.NewIdentifier("Ω"), 0),
+		nil,
+		factory.NewToken(ast.KindEqualsToken),
+		packedTypeExpr,
+	)
+
+	// Build the call/new without type arguments (they stay for TS but will be erased)
+	var callNode *ast.Node
+	if isNew {
+		newExpr := node.AsNewExpression()
+		callNode = factory.NewNewExpression(
+			newExpr.Expression,
+			newExpr.TypeArguments,
+			newExpr.Arguments,
+		)
+	} else {
+		callExpr := node.AsCallExpression()
+		callNode = factory.NewCallExpression(
+			callExpr.Expression,
+			nil,
+			callExpr.TypeArguments,
+			callExpr.Arguments,
+			callExpr.Flags,
+		)
+	}
+
+	// (fn.Ω = [types], fn())
+	return factory.NewParenthesizedExpression(
+		factory.NewBinaryExpression(nil,
+			omegaAssign,
+			nil,
+			factory.NewToken(ast.KindCommaToken),
+			callNode,
+		),
+	)
 }
 
 // handleAutoTypeFunction transforms typeOf<T>() → typeOf(__ΩT)

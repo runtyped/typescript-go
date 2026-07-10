@@ -1831,3 +1831,454 @@ func (tc *typeCompiler) shouldReExportOmegaSymbol(originalName string, exportDec
 		return false
 	}
 }
+
+// ─── ReceiveType support ───
+
+// getReceiveTypeParameter checks if a type node is ReceiveType<T> and returns
+// the type reference node if so. Also handles union types containing ReceiveType.
+func getReceiveTypeParameter(typeNode *ast.Node) *ast.Node {
+	if typeNode == nil {
+		return nil
+	}
+	if typeNode.Kind == ast.KindUnionType {
+		for _, t := range typeNode.AsUnionTypeNode().Types.Nodes {
+			if rfn := getReceiveTypeParameter(t); rfn != nil {
+				return rfn
+			}
+		}
+		return nil
+	}
+	if typeNode.Kind == ast.KindTypeReference {
+		typeRef := typeNode.AsTypeReferenceNode()
+		if typeRef.TypeName.Kind == ast.KindIdentifier {
+			name := typeRef.TypeName.AsIdentifier().Text
+			if name == "ReceiveType" && typeRef.TypeArguments != nil && len(typeRef.TypeArguments.Nodes) == 1 {
+				return typeNode
+			}
+		}
+	}
+	return nil
+}
+
+// ReceiveTypeInfo maps type argument index → parameter index for ReceiveType params.
+type ReceiveTypeInfo struct {
+	TypeArgToParamIndex map[int]int
+	TotalParams         int
+}
+
+// extractReceiveTypeMapping builds a mapping from type parameter index to the
+// parameter index where ReceiveType<T> appears.
+func extractReceiveTypeMapping(typeParameters *ast.NodeList, parameters []*ast.Node) *ReceiveTypeInfo {
+	if typeParameters == nil || len(typeParameters.Nodes) == 0 {
+		return nil
+	}
+
+	mapping := make(map[int]int)
+	for paramIdx, param := range parameters {
+		paramDecl := param.AsParameterDeclaration()
+		if paramDecl.Type == nil {
+			continue
+		}
+		receiveType := getReceiveTypeParameter(paramDecl.Type)
+		if receiveType == nil {
+			continue
+		}
+		typeRef := receiveType.AsTypeReferenceNode()
+		if typeRef.TypeArguments == nil || len(typeRef.TypeArguments.Nodes) == 0 {
+			continue
+		}
+		first := typeRef.TypeArguments.Nodes[0]
+		if first.Kind != ast.KindTypeReference {
+			continue
+		}
+		firstRef := first.AsTypeReferenceNode()
+		if firstRef.TypeName.Kind != ast.KindIdentifier {
+			continue
+		}
+		typeParamName := firstRef.TypeName.AsIdentifier().Text
+		for i, tp := range typeParameters.Nodes {
+			tpDecl := tp.AsTypeParameterDeclaration()
+			if tpDecl.Name() != nil && tpDecl.Name().Kind == ast.KindIdentifier {
+				if tpDecl.Name().AsIdentifier().Text == typeParamName {
+					mapping[i] = paramIdx
+				}
+			}
+		}
+	}
+
+	if len(mapping) == 0 {
+		return nil
+	}
+	return &ReceiveTypeInfo{
+		TypeArgToParamIndex: mapping,
+		TotalParams:         len(parameters),
+	}
+}
+
+// hasReceiveTypeParameter checks if any parameter has a ReceiveType<T> type.
+func hasReceiveTypeParameter(parameters []*ast.Node) bool {
+	for _, param := range parameters {
+		paramDecl := param.AsParameterDeclaration()
+		if paramDecl.Type != nil && getReceiveTypeParameter(paramDecl.Type) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// CallReceiveTypeResult represents the result of resolving a call target's ReceiveType info.
+type CallReceiveTypeResult struct {
+	Kind string // "direct" or "skip"
+	Info *ReceiveTypeInfo
+}
+
+// resolveValueDeclaration resolves a value-space identifier to its declaration node,
+// walking scope chains and following imports.
+func (tc *typeCompiler) resolveValueDeclaration(identifier *ast.Node) *ast.Node {
+	if identifier == nil || identifier.Kind != ast.KindIdentifier {
+		return nil
+	}
+	name := identifier.AsIdentifier().Text
+
+	// Walk up the parent chain looking for the symbol in locals
+	current := identifier.Parent
+	for current != nil {
+		if current.Locals() != nil {
+			sym := current.Locals()[name]
+			if sym != nil && len(sym.Declarations) > 0 {
+				decl := sym.Declarations[0]
+				if decl.Kind != ast.KindParameter {
+					// Follow imports
+					return tc.followImportToDeclaration(name, decl)
+				}
+			}
+		}
+		if current.Kind == ast.KindSourceFile {
+			break
+		}
+		current = current.Parent
+	}
+	return nil
+}
+
+// followImportToDeclaration follows import specifiers/clauses to their source declaration.
+func (tc *typeCompiler) followImportToDeclaration(name string, decl *ast.Node) *ast.Node {
+	switch decl.Kind {
+	case ast.KindImportSpecifier:
+		// ImportSpecifier → NamedImports → ImportClause → ImportDeclaration
+		importDecl := decl.Parent.Parent.Parent
+		return tc.resolveImportSpecifier(name, importDecl)
+	case ast.KindImportClause:
+		return tc.resolveImportSpecifier(name, decl.Parent)
+	case ast.KindImportDeclaration:
+		return tc.resolveImportSpecifier(name, decl)
+	default:
+		return decl
+	}
+}
+
+// resolveCallReceiveTypeInfo resolves a call/new expression's target to extract
+// ReceiveType parameter info. Returns nil if it can't resolve.
+func (tc *typeCompiler) resolveCallReceiveTypeInfo(node *ast.Node) *CallReceiveTypeResult {
+	var expression *ast.Node
+	var isNew bool
+	if node.Kind == ast.KindCallExpression {
+		expression = node.AsCallExpression().Expression
+	} else if node.Kind == ast.KindNewExpression {
+		expression = node.AsNewExpression().Expression
+		isNew = true
+	} else {
+		return nil
+	}
+
+	// Case 1: Simple identifier call — fn<T>(args) or new Cls<T>(args)
+	if expression.Kind == ast.KindIdentifier {
+		decl := tc.resolveValueDeclaration(expression)
+		if decl == nil {
+			return nil
+		}
+
+		if decl.Kind == ast.KindFunctionDeclaration {
+			fnDecl := decl.AsFunctionDeclaration()
+			if fnDecl.TypeParameters == nil {
+				return &CallReceiveTypeResult{Kind: "skip"}
+			}
+			info := extractReceiveTypeMapping(fnDecl.TypeParameters, fnDecl.Parameters.Nodes)
+			if info == nil {
+				return &CallReceiveTypeResult{Kind: "skip"}
+			}
+			return &CallReceiveTypeResult{Kind: "direct", Info: info}
+		}
+
+		if decl.Kind == ast.KindVariableDeclaration {
+			varDecl := decl.AsVariableDeclaration()
+			init := varDecl.Initializer
+			if init == nil {
+				return nil
+			}
+
+			// Unwrap __assignType(fn, ...) wrapper
+			unwrapped := getAssignTypeExpression(init)
+			if unwrapped != nil {
+				init = unwrapped
+			}
+			// Unwrap parenthesized expression
+			for init.Kind == ast.KindParenthesizedExpression {
+				init = init.AsParenthesizedExpression().Expression
+			}
+
+			if init.Kind == ast.KindArrowFunction {
+				arrowFn := init.AsArrowFunction()
+				if arrowFn.TypeParameters == nil {
+					return &CallReceiveTypeResult{Kind: "skip"}
+				}
+				info := extractReceiveTypeMapping(arrowFn.TypeParameters, arrowFn.Parameters.Nodes)
+				if info == nil {
+					return &CallReceiveTypeResult{Kind: "skip"}
+				}
+				return &CallReceiveTypeResult{Kind: "direct", Info: info}
+			}
+			if init.Kind == ast.KindFunctionExpression {
+				fnExpr := init.AsFunctionExpression()
+				if fnExpr.TypeParameters == nil {
+					return &CallReceiveTypeResult{Kind: "skip"}
+				}
+				info := extractReceiveTypeMapping(fnExpr.TypeParameters, fnExpr.Parameters.Nodes)
+				if info == nil {
+					return &CallReceiveTypeResult{Kind: "skip"}
+				}
+				return &CallReceiveTypeResult{Kind: "direct", Info: info}
+			}
+
+			if isNew {
+				if init.Kind == ast.KindClassExpression {
+					classExpr := init.AsClassExpression()
+					ctor := findConstructor(classExpr.Members.Nodes)
+					if ctor != nil && classExpr.TypeParameters != nil {
+						info := extractReceiveTypeMapping(classExpr.TypeParameters, ctor.AsConstructorDeclaration().Parameters.Nodes)
+						if info != nil {
+							return &CallReceiveTypeResult{Kind: "direct", Info: info}
+						}
+					}
+					return &CallReceiveTypeResult{Kind: "skip"}
+				}
+			}
+			return nil
+		}
+
+		if isNew && decl.Kind == ast.KindClassDeclaration {
+			classDecl := decl.AsClassDeclaration()
+			if classDecl.TypeParameters == nil {
+				return &CallReceiveTypeResult{Kind: "skip"}
+			}
+			ctor := findConstructor(classDecl.Members.Nodes)
+			if ctor != nil {
+				info := extractReceiveTypeMapping(classDecl.TypeParameters, ctor.AsConstructorDeclaration().Parameters.Nodes)
+				if info != nil {
+					return &CallReceiveTypeResult{Kind: "direct", Info: info}
+				}
+			}
+			return &CallReceiveTypeResult{Kind: "skip"}
+		}
+
+		return nil
+	}
+
+	// Case 2: Property access — this.method<T>() or obj.method<T>()
+	// For now, we only handle this.method<T>() — walk up to enclosing class
+	if expression.Kind == ast.KindPropertyAccessExpression {
+		propAccess := expression.AsPropertyAccessExpression()
+		if propAccess.Expression.Kind == ast.KindThisKeyword {
+			methodName := ""
+			if propAccess.Name().Kind == ast.KindIdentifier {
+				methodName = propAccess.Name().AsIdentifier().Text
+			}
+			if methodName == "" {
+				return nil
+			}
+			// Walk up to find enclosing class
+			parent := node.Parent
+			for parent != nil {
+				if parent.Kind == ast.KindClassDeclaration || parent.Kind == ast.KindClassExpression {
+					classMembers := parent.ClassLikeData().Members
+					for _, m := range classMembers.Nodes {
+						if m.Kind == ast.KindMethodDeclaration && m.AsMethodDeclaration().Name() != nil {
+							methodName2 := ""
+							if m.AsMethodDeclaration().Name().Kind == ast.KindIdentifier {
+								methodName2 = m.AsMethodDeclaration().Name().AsIdentifier().Text
+							}
+							if methodName2 == methodName {
+								methodDecl := m.AsMethodDeclaration()
+								if methodDecl.TypeParameters == nil {
+									return &CallReceiveTypeResult{Kind: "skip"}
+								}
+								info := extractReceiveTypeMapping(methodDecl.TypeParameters, methodDecl.Parameters.Nodes)
+								if info == nil {
+									return &CallReceiveTypeResult{Kind: "skip"}
+								}
+								return &CallReceiveTypeResult{Kind: "direct", Info: info}
+							}
+						}
+					}
+					return nil
+				}
+				parent = parent.Parent
+			}
+			return nil
+		}
+
+		// obj.method<T>() — resolve obj to const variable, then find class/type
+		if propAccess.Expression.Kind == ast.KindIdentifier {
+			methodName := ""
+			if propAccess.Name().Kind == ast.KindIdentifier {
+				methodName = propAccess.Name().AsIdentifier().Text
+			}
+			if methodName == "" {
+				return nil
+			}
+			decl := tc.resolveValueDeclaration(propAccess.Expression)
+			if decl == nil || decl.Kind != ast.KindVariableDeclaration {
+				return nil
+			}
+			varDecl := decl.AsVariableDeclaration()
+			init := varDecl.Initializer
+			if init == nil {
+				return nil
+			}
+
+			// new ClassName() — resolve class and find method
+			if init.Kind == ast.KindNewExpression && init.AsNewExpression().Expression.Kind == ast.KindIdentifier {
+				classDecl := tc.resolveValueDeclaration(init.AsNewExpression().Expression)
+				if classDecl != nil && classDecl.Kind == ast.KindClassDeclaration {
+					classMembers := classDecl.ClassLikeData().Members
+					for _, m := range classMembers.Nodes {
+						if m.Kind == ast.KindMethodDeclaration && m.AsMethodDeclaration().Name() != nil {
+							methodName2 := ""
+							if m.AsMethodDeclaration().Name().Kind == ast.KindIdentifier {
+								methodName2 = m.AsMethodDeclaration().Name().AsIdentifier().Text
+							}
+							if methodName2 == methodName {
+								methodDecl := m.AsMethodDeclaration()
+								if methodDecl.TypeParameters == nil {
+									return &CallReceiveTypeResult{Kind: "skip"}
+								}
+								info := extractReceiveTypeMapping(methodDecl.TypeParameters, methodDecl.Parameters.Nodes)
+								if info == nil {
+									return &CallReceiveTypeResult{Kind: "skip"}
+								}
+								return &CallReceiveTypeResult{Kind: "direct", Info: info}
+							}
+						}
+					}
+				}
+				return nil
+			}
+
+			// Object literal: const obj = { method: <T>(type: ReceiveType<T>) => {} }
+			if init.Kind == ast.KindObjectLiteralExpression {
+				for _, prop := range init.AsObjectLiteralExpression().Properties.Nodes {
+					if prop.Kind != ast.KindPropertyAssignment {
+						continue
+					}
+					pa := prop.AsPropertyAssignment()
+					if pa.Name().Kind != ast.KindIdentifier || pa.Name().AsIdentifier().Text != methodName {
+						continue
+					}
+					propInit := pa.Initializer
+					// Unwrap __assignType
+					unwrapped := getAssignTypeExpression(propInit)
+					if unwrapped != nil {
+						propInit = unwrapped
+					}
+					for propInit.Kind == ast.KindParenthesizedExpression {
+						propInit = propInit.AsParenthesizedExpression().Expression
+					}
+					if propInit.Kind == ast.KindArrowFunction {
+						arrowFn := propInit.AsArrowFunction()
+						if arrowFn.TypeParameters == nil {
+							return &CallReceiveTypeResult{Kind: "skip"}
+						}
+						info := extractReceiveTypeMapping(arrowFn.TypeParameters, arrowFn.Parameters.Nodes)
+						if info == nil {
+							return &CallReceiveTypeResult{Kind: "skip"}
+						}
+						return &CallReceiveTypeResult{Kind: "direct", Info: info}
+					}
+					if propInit.Kind == ast.KindFunctionExpression {
+						fnExpr := propInit.AsFunctionExpression()
+						if fnExpr.TypeParameters == nil {
+							return &CallReceiveTypeResult{Kind: "skip"}
+						}
+						info := extractReceiveTypeMapping(fnExpr.TypeParameters, fnExpr.Parameters.Nodes)
+						if info == nil {
+							return &CallReceiveTypeResult{Kind: "skip"}
+						}
+						return &CallReceiveTypeResult{Kind: "direct", Info: info}
+					}
+				}
+				return nil
+			}
+			return nil
+		}
+	}
+
+	return nil
+}
+
+// findConstructor finds the constructor in a class-like members list.
+func findConstructor(members []*ast.Node) *ast.Node {
+	for _, m := range members {
+		if m.Kind == ast.KindConstructor {
+			return m
+		}
+	}
+	return nil
+}
+
+// buildDirectPassingArgs places type expressions at their ReceiveType parameter positions.
+// Returns nil if we can't place (user already provided args at ReceiveType positions).
+func (tc *typeCompiler) buildDirectPassingArgs(existingArgs []*ast.Node, typeExpressions []*ast.Node, info *ReceiveTypeInfo) []*ast.Node {
+	args := make([]*ast.Node, len(existingArgs))
+	copy(args, existingArgs)
+
+	for typeArgIdx, paramIdx := range info.TypeArgToParamIndex {
+		if typeArgIdx >= len(typeExpressions) {
+			continue
+		}
+		// If the user already passed an argument at this position, fall back to Ω
+		if paramIdx < len(existingArgs) {
+			return nil
+		}
+		// Pad with void 0 up to paramIdx
+		for len(args) < paramIdx {
+			args = append(args, tc.factory.NewVoidZeroExpression())
+		}
+		// Extend if needed
+		for len(args) <= paramIdx {
+			args = append(args, nil)
+		}
+		args[paramIdx] = typeExpressions[typeArgIdx]
+	}
+
+	return args
+}
+
+// getAssignTypeExpression checks if an expression is a __assignType(fn, ...) call
+// and returns the first argument (the original expression). Handles parenthesized wrappers.
+func getAssignTypeExpression(node *ast.Node) *ast.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == ast.KindParenthesizedExpression {
+		node = node.AsParenthesizedExpression().Expression
+	}
+	if node.Kind == ast.KindCallExpression {
+		call := node.AsCallExpression()
+		if call.Expression != nil && call.Expression.Kind == ast.KindIdentifier &&
+			call.Expression.AsIdentifier().Text == "__assignType" &&
+			call.Arguments != nil && len(call.Arguments.Nodes) > 0 {
+			return call.Arguments.Nodes[0]
+		}
+	}
+	return nil
+}

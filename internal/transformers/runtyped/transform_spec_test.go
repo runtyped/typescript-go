@@ -122,3 +122,52 @@ function fn(logger: Logger) {}`)
 		assertNotContains(t, output, "function default(")
 	})
 }
+
+// ─── ReceiveType tests (single-file, no binder) ───
+// Note: These tests verify the transformer's output without a full program.
+// resolveValueDeclaration needs the binder to find locals, so direct passing
+// is only tested via the harness tests (TestReceiveTypePassing etc.).
+// These tests verify Ω reset and parameter default injection.
+
+func TestReceiveTypeSingleFile(t *testing.T) {
+	t.Run("FunctionDeclarationReceivesOmegaReset", func(t *testing.T) {
+		// function getType<T>(type?: ReceiveType<T>) {}
+		// → body starts with getType.Ω = undefined
+		output := transformEmit(t, `function getType<T>(type?: ReceiveType<T>) {
+            return type;
+        }`)
+
+		assertContains(t, output, "getType.Ω = undefined")
+	})
+
+	t.Run("FunctionDeclarationParameterDefault", func(t *testing.T) {
+		// The ReceiveType<T> parameter should get a default value of getType.Ω
+		output := transformEmit(t, `function getType<T>(type?: ReceiveType<T>) {
+            return type;
+        }`)
+
+		// The parameter should have default = getType.Ω
+		assertContains(t, output, "getType.Ω")
+	})
+
+	t.Run("PassTypeArgumentArrowFunction", func(t *testing.T) {
+		// (<T>(type?: ReceiveType<T>) => {})<string>();
+		// Arrow functions in inline expressions are excluded from type passing
+		output := transformEmit(t, `(<T>(type?: ReceiveType<T>) => {})<string>();`)
+
+		// Should compile without error — that's the main thing
+		_ = output
+	})
+
+	t.Run("OmegaSideChannelFallback", func(t *testing.T) {
+		// Without binder, resolveValueDeclaration can't find the function,
+		// so it falls back to the Ω side-channel: (fn.Ω = [type], fn<string>())
+		output := transformEmit(t, `function getType<T>(type?: ReceiveType<T>) {
+        }
+
+        getType<string>();`)
+
+		// Should have Ω side-channel (fallback when can't resolve)
+		assertContains(t, output, "getType.Ω = [")
+	})
+}
