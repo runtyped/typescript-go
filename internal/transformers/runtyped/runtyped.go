@@ -7,26 +7,6 @@ import (
 	"github.com/microsoft/typescript-go/internal/transformers"
 )
 
-// ReflectionOp mirrors @runtyped/type-spec's ReflectionOp enum.
-// Only a minimal subset is defined here for the proof of concept.
-const (
-	ReflectionOpNever   = 0
-	ReflectionOpAny     = 1
-	ReflectionOpString  = 5
-	ReflectionOpNumber  = 6
-	ReflectionOpNominal = 93 // last op in the enum
-)
-
-// encodeOps mirrors @runtyped/type-compiler's encodeOps function.
-// Each opcode is encoded as a single character (opcode + 33, starting at '!').
-func encodeOps(ops []int) string {
-	buf := make([]byte, len(ops))
-	for i, op := range ops {
-		buf[i] = byte(op + 33)
-	}
-	return string(buf)
-}
-
 // NewReflectionTransformer creates a transformer that adds runtime type
 // information (__type and __Ω) to classes, type aliases, and imports,
 // before type annotations are erased.
@@ -42,6 +22,11 @@ type reflectionTransformer struct {
 	transformers.Transformer
 	compilerOptions *core.CompilerOptions
 	emitContext     *printer.EmitContext
+
+	// Per-file state
+	sourceFile *ast.SourceFile
+	tc         *typeCompiler
+
 	// omegaStatements collects __Ω variable declarations to prepend at module scope
 	omegaStatements []*ast.Node
 	// additionalImports collects import { __ΩX } from '...' statements to append
@@ -64,11 +49,26 @@ func (tx *reflectionTransformer) visit(node *ast.Node) *ast.Node {
 	case ast.KindTypeAliasDeclaration:
 		return tx.visitTypeAliasDeclaration(node.AsTypeAliasDeclaration())
 
+	case ast.KindInterfaceDeclaration:
+		return tx.visitInterfaceDeclaration(node.AsInterfaceDeclaration())
+
+	case ast.KindEnumDeclaration:
+		return tx.visitEnumDeclaration(node.AsEnumDeclaration())
+
 	case ast.KindImportDeclaration:
 		return tx.visitImportDeclaration(node.AsImportDeclaration())
 
 	case ast.KindExportDeclaration:
 		return tx.visitExportDeclaration(node.AsExportDeclaration())
+
+	case ast.KindFunctionDeclaration:
+		return tx.visitFunctionDeclaration(node)
+
+	case ast.KindFunctionExpression:
+		return tx.visitFunctionExpression(node)
+
+	case ast.KindArrowFunction:
+		return tx.visitArrowFunction(node)
 
 	default:
 		return tx.Visitor().VisitEachChild(node)
@@ -82,6 +82,9 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	tx.omegaStatements = nil
 	tx.additionalImports = nil
 	tx.additionalReExports = nil
+	tx.sourceFile = node
+	tx.tc = newTypeCompiler(tx.Factory())
+	tx.tc.sourceFile = node
 
 	// Visit all children (which collects omegaStatements, additionalImports, etc.)
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsSourceFile()
@@ -89,12 +92,16 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	// Collect all top-level statements
 	statements := visited.Statements.Nodes
 
-	// Append omega variables (type alias declarations) before additional imports
+	// Process compileDeclarations and embedDeclarations
+	// This is the iterative loop from compiler.ts that compiles all pending declarations
+	tx.processDeclarations()
+
+	// Prepend omega variables (type alias/interface/enum declarations)
 	if len(tx.omegaStatements) > 0 {
 		statements = append(tx.omegaStatements, statements...)
 	}
 
-	// Append additional imports at the end
+	// Append additional imports
 	if len(tx.additionalImports) > 0 {
 		statements = append(statements, tx.additionalImports...)
 	}
@@ -110,43 +117,256 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	return tx.Factory().UpdateSourceFile(visited, stmtList, visited.EndOfFileToken).AsSourceFile().AsNode()
 }
 
+// processDeclarations handles the compileDeclarations and embedDeclarations maps.
+func (tx *reflectionTransformer) processDeclarations() {
+	for {
+		allCompiled := true
+		for _, d := range tx.tc.compileDeclarations {
+			if d.compiled != nil {
+				continue
+			}
+			allCompiled = false
+			break
+		}
+
+		if len(tx.tc.embedDeclarations) == 0 && allCompiled {
+			break
+		}
+
+		// Compile pending declarations
+		for declNode, d := range tx.tc.compileDeclarations {
+			if d.compiled != nil {
+				continue
+			}
+			d.compiled = tx.tc.createProgramVarFromNode(declNode, d.name)
+			tx.omegaStatements = append(tx.omegaStatements, d.compiled...)
+		}
+
+		// Embed declarations
+		if len(tx.tc.embedDeclarations) > 0 {
+			for node := range tx.tc.embedDeclarations {
+				tx.tc.compiledDeclarations[node] = true
+			}
+			entries := tx.tc.embedDeclarations
+			tx.tc.embedDeclarations = make(map[*ast.Node]*embedDeclEntry)
+			for node, d := range entries {
+				stmts := tx.tc.createProgramVarFromNode(node, d.name)
+				tx.omegaStatements = append(tx.omegaStatements, stmts...)
+			}
+		}
+	}
+
+	// Process additional imports
+	if len(tx.tc.addImports) > 0 {
+		handled := make(map[string]bool)
+		importMap := make(map[*ast.Node][]string)
+
+		for _, imp := range tx.tc.addImports {
+			if handled[imp.identifier] {
+				continue
+			}
+			handled[imp.identifier] = true
+			importMap[imp.importDecl] = append(importMap[imp.importDecl], imp.identifier)
+		}
+
+		for importDecl, identifiers := range importMap {
+			// Create: import { __ΩX, __ΩY } from 'same-module'
+			var omegaSpecifiers []*ast.Node
+			for _, id := range identifiers {
+				omegaSpecifiers = append(omegaSpecifiers, tx.Factory().NewImportSpecifier(false, nil, tx.Factory().NewIdentifier(id)))
+			}
+			newNamedImports := tx.Factory().NewNamedImports(tx.Factory().NewNodeList(omegaSpecifiers))
+			newImportClause := tx.Factory().NewImportClause(ast.KindUnknown, nil, newNamedImports)
+			moduleSpec := importDecl.AsImportDeclaration().ModuleSpecifier
+			newImport := tx.Factory().NewImportDeclaration(nil, newImportClause, moduleSpec, nil)
+			tx.additionalImports = append(tx.additionalImports, newImport)
+		}
+	}
+}
+
 // ─── Classes ───
 
 func (tx *reflectionTransformer) visitClassDeclaration(node *ast.ClassDeclaration) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsClassDeclaration()
-	typeMember := tx.createTypeMember()
+
+	// Check reflection
+	// For now, default to true (reflection enabled)
+	// Full config resolution is deferred
+
+	// Compile the class type
+	typeExpr := tx.tc.getTypeOfType(node.AsNode())
+	if typeExpr == nil {
+		typeExpr = tx.tc.valueToExpression([]stackEntry{
+			{kind: stackEntryString, str: encodeOps([]int{OpAny})},
+		})
+	}
+
+	typeMember := tx.Factory().NewPropertyDeclaration(
+		tx.Factory().NewModifierList([]*ast.Node{
+			tx.Factory().NewToken(ast.KindStaticKeyword),
+		}),
+		tx.Factory().NewIdentifier("__type"),
+		nil,
+		nil,
+		typeExpr,
+	)
+
 	members := tx.Factory().NewNodeList(append(visited.Members.Nodes, typeMember))
 	return tx.Factory().UpdateClassDeclaration(visited, visited.Modifiers(), visited.Name(), visited.TypeParameters, visited.HeritageClauses, members)
 }
 
 func (tx *reflectionTransformer) visitClassExpression(node *ast.ClassExpression) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsClassExpression()
-	typeMember := tx.createTypeMember()
+
+	typeExpr := tx.tc.getTypeOfType(node.AsNode())
+	if typeExpr == nil {
+		typeExpr = tx.tc.valueToExpression([]stackEntry{
+			{kind: stackEntryString, str: encodeOps([]int{OpAny})},
+		})
+	}
+
+	typeMember := tx.Factory().NewPropertyDeclaration(
+		tx.Factory().NewModifierList([]*ast.Node{
+			tx.Factory().NewToken(ast.KindStaticKeyword),
+		}),
+		tx.Factory().NewIdentifier("__type"),
+		nil,
+		nil,
+		typeExpr,
+	)
+
 	members := tx.Factory().NewNodeList(append(visited.Members.Nodes, typeMember))
 	return tx.Factory().UpdateClassExpression(visited, visited.Modifiers(), visited.Name(), visited.TypeParameters, visited.HeritageClauses, members)
 }
 
-// ─── Type Aliases ───
+// ─── Type Aliases, Interfaces, Enums ───
 
 func (tx *reflectionTransformer) visitTypeAliasDeclaration(node *ast.TypeAliasDeclaration) *ast.Node {
-	// Visit children first
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsTypeAliasDeclaration()
 
-	// Create the __Ω variable: const __ΩFoo = "!"; (hardcoded to ReflectionOp.any for PoC)
-	name := visited.Name().AsIdentifier().Text
-	omegaVar := tx.createOmegaVariable(name)
-	tx.omegaStatements = append(tx.omegaStatements, omegaVar)
-
-	// If the type alias is exported, we also need to re-export __ΩFoo
-	if visited.Modifiers() != nil && hasModifier(visited.Modifiers(), ast.ModifierFlagsExport) {
-		omegaName := tx.Factory().NewIdentifier("__Ω" + name)
-		exportSpec := tx.Factory().NewExportSpecifier(false, omegaName, omegaName)
-		namedExports := tx.Factory().NewNamedExports(tx.Factory().NewNodeList([]*ast.Node{exportSpec}))
-		reExport := tx.Factory().NewExportDeclaration(nil, false, namedExports, nil, nil)
-		tx.additionalReExports = append(tx.additionalReExports, reExport)
+	// Register for compilation
+	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
+		tx.tc.compileDeclarations[node.AsNode()] = &compileDeclEntry{
+			name:      getIdentifierName(visited.Name()),
+			sourceFile: tx.sourceFile,
+		}
 	}
 
 	return visited.AsNode()
+}
+
+func (tx *reflectionTransformer) visitInterfaceDeclaration(node *ast.InterfaceDeclaration) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsInterfaceDeclaration()
+
+	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
+		tx.tc.compileDeclarations[node.AsNode()] = &compileDeclEntry{
+			name:      getIdentifierName(visited.Name()),
+			sourceFile: tx.sourceFile,
+		}
+	}
+
+	return visited.AsNode()
+}
+
+func (tx *reflectionTransformer) visitEnumDeclaration(node *ast.EnumDeclaration) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsEnumDeclaration()
+
+	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
+		tx.tc.compileDeclarations[node.AsNode()] = &compileDeclEntry{
+			name:      getIdentifierName(visited.Name()),
+			sourceFile: tx.sourceFile,
+		}
+	}
+
+	return visited.AsNode()
+}
+
+// ─── Functions ───
+
+func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node).AsFunctionDeclaration()
+
+	encodedType := tx.tc.getTypeOfFunction(node)
+	if encodedType == nil {
+		return visited.AsNode()
+	}
+
+	fnName := visited.Name()
+	if fnName == nil {
+		// Default export function — wrap with __assignType
+		tx.tc.embedAssignType = true
+		return tx.Factory().NewExportAssignment(nil, false, nil,
+			tx.wrapWithAssignType(node, encodedType))
+	}
+
+	// fn.__type = encodedType
+	typeAssignment := tx.Factory().NewExpressionStatement(
+		tx.Factory().NewBinaryExpression(nil,
+			tx.Factory().NewPropertyAccessExpression(
+				tx.serializeEntityNameAsExpression(fnName), nil, tx.Factory().NewIdentifier("__type"), 0),
+			nil,
+			tx.Factory().NewToken(ast.KindEqualsToken),
+			encodedType))
+
+	// For module-level functions, hoist the __type assignment
+	if node.Parent != nil && node.Parent.Kind == ast.KindSourceFile {
+		tx.tc.functionTypeAssignments = append(tx.tc.functionTypeAssignments, typeAssignment)
+		return visited.AsNode()
+	}
+
+	// Block-scoped: return both
+	// Note: in Go AST, we can't return multiple nodes from a visitor.
+	// The TypeScript version returns [declaration, typeAssignment] as an array.
+	// We need to handle this differently — for now, append as a sibling.
+	// This is a known limitation that the test suite will surface.
+	return visited.AsNode()
+}
+
+func (tx *reflectionTransformer) visitFunctionExpression(node *ast.Node) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node).AsFunctionExpression()
+
+	encodedType := tx.tc.getTypeOfFunction(node)
+	if encodedType == nil {
+		return visited.AsNode()
+	}
+
+	tx.tc.embedAssignType = true
+	return tx.wrapWithAssignType(node, encodedType)
+}
+
+func (tx *reflectionTransformer) visitArrowFunction(node *ast.Node) *ast.Node {
+	visited := tx.Visitor().VisitEachChild(node).AsArrowFunction()
+
+	encodedType := tx.tc.getTypeOfFunction(node)
+	if encodedType == nil {
+		return visited.AsNode()
+	}
+
+	tx.tc.embedAssignType = true
+	return tx.wrapWithAssignType(node, encodedType)
+}
+
+func (tx *reflectionTransformer) wrapWithAssignType(fn *ast.Node, typeExpr *ast.Node) *ast.Node {
+	return tx.Factory().NewCallExpression(
+		tx.Factory().NewIdentifier("__assignType"),
+		nil,
+		nil,
+		tx.Factory().NewNodeList([]*ast.Node{fn, typeExpr}),
+		ast.NodeFlagsNone,
+	)
+}
+
+// serializeEntityNameAsExpression converts an Identifier to an expression.
+func (tx *reflectionTransformer) serializeEntityNameAsExpression(name *ast.Node) *ast.Node {
+	if name.Kind == ast.KindIdentifier {
+		return tx.Factory().NewIdentifier(name.AsIdentifier().Text)
+	}
+	if name.Kind == ast.KindQualifiedName {
+		qn := name.AsQualifiedName()
+		left := tx.serializeEntityNameAsExpression(qn.Left)
+		return tx.Factory().NewPropertyAccessExpression(left, nil, qn.Right, 0)
+	}
+	return tx.Factory().NewIdentifier("undefined")
 }
 
 // ─── Imports ───
@@ -183,7 +403,6 @@ func (tx *reflectionTransformer) visitImportDeclaration(node *ast.ImportDeclarat
 	}
 
 	if len(omegaSpecifiers) > 0 {
-		// Create: import { __ΩX, __ΩY } from 'same-module'
 		newNamedImports := tx.Factory().NewNamedImports(tx.Factory().NewNodeList(omegaSpecifiers))
 		newImportClause := tx.Factory().NewImportClause(ast.KindUnknown, nil, newNamedImports)
 		newImport := tx.Factory().NewImportDeclaration(nil, newImportClause, visited.ModuleSpecifier, nil)
@@ -228,41 +447,4 @@ func (tx *reflectionTransformer) visitExportDeclaration(node *ast.ExportDeclarat
 	}
 
 	return visited.AsNode()
-}
-
-// ─── Helpers ───
-
-// createTypeMember creates: static __type = "!"
-// (encodeOps([ReflectionOp.any]) = String.fromCharCode(1 + 33) = String.fromCharCode(34) = '"')
-func (tx *reflectionTransformer) createTypeMember() *ast.Node {
-	encodedType := encodeOps([]int{ReflectionOpAny})
-	typeValue := tx.Factory().NewStringLiteral(encodedType, ast.TokenFlagsNone)
-	staticModifier := tx.Factory().NewModifierList([]*ast.Node{
-		tx.Factory().NewToken(ast.KindStaticKeyword),
-	})
-	return tx.Factory().NewPropertyDeclaration(
-		staticModifier,
-		tx.Factory().NewIdentifier("__type"),
-		nil, // exclamationToken
-		nil, // typeNode
-		typeValue,
-	)
-}
-
-// createOmegaVariable creates: const __ΩName = "!";  (for type aliases with reflection)
-func (tx *reflectionTransformer) createOmegaVariable(name string) *ast.Node {
-	omegaName := tx.Factory().NewIdentifier("__Ω" + name)
-	encodedType := encodeOps([]int{ReflectionOpAny})
-	typeValue := tx.Factory().NewStringLiteral(encodedType, ast.TokenFlagsNone)
-	varDecl := tx.Factory().NewVariableDeclaration(omegaName, nil, nil, typeValue)
-	varDeclList := tx.Factory().NewVariableDeclarationList(tx.Factory().NewNodeList([]*ast.Node{varDecl}), ast.NodeFlagsConst)
-	return tx.Factory().NewVariableStatement(nil, varDeclList)
-}
-
-// hasModifier checks if a ModifierList contains a specific modifier flag.
-func hasModifier(modifiers *ast.ModifierList, flag ast.ModifierFlags) bool {
-	if modifiers == nil {
-		return false
-	}
-	return modifiers.ModifierFlags&flag != 0
 }

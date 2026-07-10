@@ -15,6 +15,12 @@ import (
 // Tests the reflection transformer in isolation (without the type eraser).
 // Type annotations remain in the output because the type eraser runs
 // after this transformer in the real pipeline.
+//
+// The __type arrays contain real encoded type programs (opcodes + stack entries).
+// Opcodes are encoded as charCode(op + 33), e.g.:
+//   '!' = 0 (never), '"' = 1 (any), '&' = 5 (string), "'" = 6 (number),
+//   '0' = 17 (parameter), '3' = 20 (class), '5' = 22 (classReference),
+//   'P' = 48 (method), 'w' = 86 (typeName), 'y' = 88 (nominal)
 func TestReflectionTransformer(t *testing.T) {
 	t.Parallel()
 	data := []struct {
@@ -25,22 +31,22 @@ func TestReflectionTransformer(t *testing.T) {
 		{
 			title:  "SimpleClass",
 			input:  "class User { name: string; age: number; }",
-			output: "class User {\n    name: string;\n    age: number;\n    static __type = \"\\\"\";\n}",
+			output: "class User {\n    name: string;\n    age: number;\n    static __type = [\"name\", \"age\", \"User\", \"&3!'3!5w!\"];\n}",
 		},
 		{
 			title:  "EmptyClass",
 			input:  "class Empty { }",
-			output: "class Empty {\n    static __type = \"\\\"\";\n}",
+			output: "class Empty {\n    static __type = [\"Empty\", \"5w!\"];\n}",
 		},
 		{
 			title:  "ClassExpression",
 			input:  "(class User { name: string; })",
-			output: "(class User {\n    name: string;\n    static __type = \"\\\"\";\n});",
+			output: "(class User {\n    name: string;\n    static __type = [\"name\", \"User\", \"&3!5w!\"];\n});",
 		},
 		{
 			title:  "ClassWithMethod",
 			input:  "class Service { greet(): string { return 'hi'; } }",
-			output: "class Service {\n    greet(): string { return 'hi'; }\n    static __type = \"\\\"\";\n}",
+			output: "class Service {\n    greet(): string { return 'hi'; }\n    static __type = [\"greet\", \"Service\", \"P&0!5w!\"];\n}",
 		},
 		{
 			title:  "NonClassPreserved",
@@ -55,23 +61,23 @@ func TestReflectionTransformer(t *testing.T) {
 		{
 			title:  "MultipleClasses",
 			input:  "class A { a: string; }\nclass B { b: number; }",
-			output: "class A {\n    a: string;\n    static __type = \"\\\"\";\n}\nclass B {\n    b: number;\n    static __type = \"\\\"\";\n}",
+			output: "class A {\n    a: string;\n    static __type = [\"a\", \"A\", \"&3!5w!\"];\n}\nclass B {\n    b: number;\n    static __type = [\"b\", \"B\", \"'3!5w!\"];\n}",
 		},
 		// ─── Type aliases ───
 		{
 			title:  "TypeAlias",
 			input:  "type Foo = string;",
-			output: "const __ΩFoo = \"\\\"\";\ntype Foo = string;",
+			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\ntype Foo = string;",
 		},
 		{
 			title:  "ExportedTypeAlias",
 			input:  "export type Foo = string;",
-			output: "const __ΩFoo = \"\\\"\";\nexport type Foo = string;\nexport { __ΩFoo as __ΩFoo };",
+			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\nexport { __ΩFoo as __ΩFoo };\nexport type Foo = string;",
 		},
 		{
 			title:  "MultipleTypeAliases",
 			input:  "type Foo = string;\ntype Bar = number;",
-			output: "const __ΩFoo = \"\\\"\";\nconst __ΩBar = \"\\\"\";\ntype Foo = string;\ntype Bar = number;",
+			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\nconst __ΩBar = [\"Bar\", \"'w!y\"];\ntype Foo = string;\ntype Bar = number;",
 		},
 		// ─── Imports ───
 		{
@@ -94,12 +100,12 @@ func TestReflectionTransformer(t *testing.T) {
 		{
 			title:  "ClassAndTypeAlias",
 			input:  "type Status = string;\nclass User { status: Status; }",
-			output: "const __ΩStatus = \"\\\"\";\ntype Status = string;\nclass User {\n    status: Status;\n    static __type = \"\\\"\";\n}",
+			output: "const __ΩStatus = [\"Status\", \"&w!y\"];\ntype Status = string;\nclass User {\n    status: Status;\n    static __type = [\"status\", \"User\", \"!3!5w!\"];\n}",
 		},
 		{
 			title:  "ImportAndClass",
 			input:  "import { User } from './models';\nclass Service { user: User; }",
-			output: "import { User } from './models';\nclass Service {\n    user: User;\n    static __type = \"\\\"\";\n}\nimport { __ΩUser } from './models';",
+			output: "import { User } from './models';\nclass Service {\n    user: User;\n    static __type = [\"user\", \"Service\", \"!3!5w!\"];\n}\nimport { __ΩUser } from './models';",
 		},
 	}
 
@@ -127,12 +133,12 @@ func TestReflectionTransformerWithTypeEraser(t *testing.T) {
 		{
 			title:  "SimpleClass",
 			input:  "class User { name: string; age: number; }",
-			output: "class User {\n    name;\n    age;\n    static __type = \"\\\"\";\n}",
+			output: "class User {\n    name;\n    age;\n    static __type = [\"name\", \"age\", \"User\", \"&3!'3!5w!\"];\n}",
 		},
 		{
 			title:  "EmptyClass",
 			input:  "class Empty { }",
-			output: "class Empty {\n    static __type = \"\\\"\";\n}",
+			output: "class Empty {\n    static __type = [\"Empty\", \"5w!\"];\n}",
 		},
 		{
 			title:  "FunctionPreserved",
@@ -143,18 +149,18 @@ func TestReflectionTransformerWithTypeEraser(t *testing.T) {
 		{
 			title:  "TypeAliasElided",
 			input:  "type Foo = string;",
-			output: "const __ΩFoo = \"\\\"\";",
+			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];",
 		},
 		{
 			title:  "ExportedTypeAliasElided",
 			input:  "export type Foo = string;",
-			output: "const __ΩFoo = \"\\\"\";\nexport { __ΩFoo as __ΩFoo };",
+			output: "const __ΩFoo = [\"Foo\", \"&w!y\"];\nexport { __ΩFoo as __ΩFoo };",
 		},
 		// ─── Imports: original import kept (import elision is a separate transformer) ───
 		{
 			title:  "ImportWithClass",
 			input:  "import { User } from './models';\nclass Service { user: User; }",
-			output: "import { User } from './models';\nclass Service {\n    user;\n    static __type = \"\\\"\";\n}\nimport { __ΩUser } from './models';",
+			output: "import { User } from './models';\nclass Service {\n    user;\n    static __type = [\"user\", \"Service\", \"!3!5w!\"];\n}\nimport { __ΩUser } from './models';",
 		},
 		// ─── Re-exports: original re-export kept (import elision is a separate transformer) ───
 		{
