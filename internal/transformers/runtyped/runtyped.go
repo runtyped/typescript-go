@@ -491,12 +491,22 @@ func (tx *reflectionTransformer) visitExportDeclaration(node *ast.ExportDeclarat
 	}
 
 	// For each exported name, add __Ω{name} re-export from the same module
+	// For aliased exports (export { User as MyUser }), produce: export { __ΩUser as __ΩMyUser }
 	var omegaSpecifiers []*ast.Node
 	for _, spec := range namedExports.Elements.Nodes {
 		specNode := spec.AsExportSpecifier()
-		name := specNode.Name().AsIdentifier().Text
-		omegaName := tx.Factory().NewIdentifier("__Ω" + name)
-		omegaSpecifiers = append(omegaSpecifiers, tx.Factory().NewExportSpecifier(false, omegaName, omegaName))
+		exportedName := specNode.Name().AsIdentifier().Text
+		omegaExportedName := tx.Factory().NewIdentifier("__Ω" + exportedName)
+
+		var omegaPropertyName *ast.Node
+		if specNode.PropertyName != nil {
+			originalName := specNode.PropertyName.AsIdentifier().Text
+			omegaPropertyName = tx.Factory().NewIdentifier("__Ω" + originalName)
+		} else {
+			omegaPropertyName = omegaExportedName
+		}
+
+		omegaSpecifiers = append(omegaSpecifiers, tx.Factory().NewExportSpecifier(false, omegaPropertyName, omegaExportedName))
 	}
 
 	if len(omegaSpecifiers) > 0 {
