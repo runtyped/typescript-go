@@ -16,6 +16,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/transformers/inliners"
 	"github.com/microsoft/typescript-go/internal/transformers/jsxtransforms"
 	"github.com/microsoft/typescript-go/internal/transformers/moduletransforms"
+	"github.com/microsoft/typescript-go/internal/transformers/runtyped"
 	"github.com/microsoft/typescript-go/internal/transformers/tstransforms"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
@@ -133,6 +134,10 @@ func getScriptTransformers(emitContext *printer.EmitContext, host printer.EmitHo
 		EmitResolver:              emitResolver,
 		GetEmitModuleFormatOfFile: host.GetEmitModuleFormatOfFile,
 	}
+
+	// Runtyped reflection transformer — must run BEFORE type erasure
+	// so it can see type annotations while they still exist in the AST
+	tx = append(tx, runtyped.NewReflectionTransformer(&opts))
 
 	// transform TypeScript syntax
 	{
