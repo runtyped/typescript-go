@@ -1,15 +1,19 @@
 package runtyped
 
 import (
+	"path/filepath"
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/printer"
 )
 
 // resolveDeclarationResult holds a resolved declaration and metadata.
 type resolveDeclarationResult struct {
-	declaration      *ast.Node
+	declaration       *ast.Node
 	importDeclaration *ast.Node // ImportDeclaration or nil
-	typeOnly         bool
+	typeOnly          bool
+	isGlobal          bool // true if resolved from global lib files
 }
 
 // typeCompiler holds the state needed during type compilation for one source file.
@@ -1119,7 +1123,7 @@ func (tc *typeCompiler) extractTypeReferenceFromEntityName(typeName *ast.Node, t
 	declSourceFile := findSourceFile(declaration)
 
 	isFromImport := resolved.importDeclaration != nil
-	isGlobal := declSourceFile == nil || (resolved.importDeclaration == nil && (declSourceFile == nil || declSourceFile.FileName() != tc.sourceFile.FileName()))
+	isGlobal := resolved.isGlobal || declSourceFile == nil || (resolved.importDeclaration == nil && (declSourceFile == nil || declSourceFile.FileName() != tc.sourceFile.FileName()))
 
 	// Follow variable declarations to their type/initializer
 	if declaration.Kind == ast.KindVariableDeclaration {
@@ -1402,8 +1406,17 @@ func (tc *typeCompiler) resolveDeclaration(typeName *ast.Node) *resolveDeclarati
 
 	if declaration == nil {
 		// Look in globals (lib files)
-		// This requires the Resolver which needs vfs — deferred for now
-		return nil
+		declaration = tc.resolveGlobalDeclaration(name)
+		if declaration == nil {
+			return nil
+		}
+		// Globals are not from imports
+		return &resolveDeclarationResult{
+			declaration:       declaration,
+			importDeclaration: nil,
+			typeOnly:          false,
+			isGlobal:          true,
+		}
 	}
 
 	var importDeclaration *ast.Node
@@ -2278,6 +2291,32 @@ func getAssignTypeExpression(node *ast.Node) *ast.Node {
 			call.Expression.AsIdentifier().Text == "__assignType" &&
 			call.Arguments != nil && len(call.Arguments.Nodes) > 0 {
 			return call.Arguments.Nodes[0]
+		}
+	}
+	return nil
+}
+
+// resolveGlobalDeclaration searches through global lib files for a type name.
+// Lib files are source files whose path contains "lib." prefix (e.g. lib.es5.d.ts).
+func (tc *typeCompiler) resolveGlobalDeclaration(name string) *ast.Node {
+	if tc.sourceFiles == nil {
+		return nil
+	}
+	for _, sf := range tc.sourceFiles() {
+		// Check if this is a lib file (default library)
+		fileName := sf.FileName()
+		base := filepath.Base(fileName)
+		if !strings.HasPrefix(base, "lib.") {
+			continue
+		}
+		// Check globals (locals at the source file level)
+		locals := sf.AsNode().Locals()
+		if locals == nil {
+			continue
+		}
+		sym := locals[name]
+		if sym != nil && len(sym.Declarations) > 0 {
+			return sym.Declarations[0]
 		}
 	}
 	return nil

@@ -399,3 +399,39 @@ func TestReceiveTypeArrowFunction(t *testing.T) {
 	t.Logf("app.js output:\n%s", appJS.Content)
 	// Arrow function inline calls are excluded from type passing — just make sure it compiles
 }
+
+func TestGlobalsPartial(t *testing.T) {
+	inputFiles := []*harnessutil.TestFile{
+		{UnitName: "app.ts", Content: `interface User {}
+export type a = Partial<User>;`},
+	}
+
+	result := harnessutil.CompileFiles(t,
+		inputFiles,
+		nil,
+		harnessutil.TestConfiguration{},
+		&tsoptions.ParsedCommandLine{
+			ParsedConfig: &core.ParsedOptions{
+				CompilerOptions: &core.CompilerOptions{
+					Module:           core.ModuleKindCommonJS,
+					ModuleResolution: core.ModuleResolutionKindNode10,
+					Target:           core.ScriptTargetES2016,
+				},
+				FileNames: []string{"/app.ts"},
+			},
+		},
+		"/",
+		nil,
+	)
+
+	appJS := result.JS.GetOrZero("/app.js")
+	if appJS == nil {
+		t.Fatal("no app.js output")
+	}
+	t.Logf("app.js output:\n%s", appJS.Content)
+
+	// Global was detected and embedded
+	if !strings.Contains(appJS.Content, "__ΩPartial") {
+		t.Errorf("expected __ΩPartial to be embedded in output")
+	}
+}
