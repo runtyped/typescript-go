@@ -685,3 +685,112 @@ function fn(logger: Logger) {}`},
 		t.Errorf("expected Logger reference in output")
 	}
 }
+
+func TestTranspileSpecs(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		checks  []string
+	}{
+		{
+			name:    "FunctionTypeRef",
+			content: `type a = Function;`,
+			checks:  []string{"() => Function"},
+		},
+		{
+			name: "EnumUnion",
+			content: `enum StatEnginePowerUnit { Hp }
+enum StatWeightUnit { Lbs, Kg }
+type StatMeasurementUnit = StatEnginePowerUnit | StatWeightUnit;
+typeOf<StatMeasurementUnit>();`,
+			checks: []string{"__ΩStatEnginePowerUnit", "__ΩStatWeightUnit"},
+		},
+		{
+			name: "ClassGenericReflection",
+			content: `class A<T> {
+    constructor(type?: ReceiveType<T>) {
+    }
+}
+new A<string>();`,
+			checks: []string{"A.__type"},
+		},
+		{
+			name: "ClassExtendsGeneric",
+			content: `class A<T> {
+    constructor(type?: ReceiveType<T>) {
+    }
+}
+class B extends A<string> {}
+new B();`,
+			checks: []string{"B.__type"},
+		},
+		{
+			name: "InlineTypeDefinitions",
+			content: `function testFn<
+    T extends ClassType<any>,
+    Prop extends keyof InstanceType<T>
+>(options: {
+    type: T;
+    props: Prop[];
+}) {
+    type R = Pick<InstanceType<T>, Prop>;
+}`,
+			checks: []string{"testFn.__type"},
+		},
+		{
+			name:    "ReadonlyArray",
+			content: `class A { constructor(readonly id: number) {} }`,
+			checks:  []string{"A.__type"},
+		},
+		{
+			name: "InferType",
+			content: `type R<T> = T extends infer U ? U : never;
+typeOf<R<string>>();`,
+			checks: []string{"__ΩR"},
+		},
+		{
+			name: "SymbolFunctionName",
+			content: `const fn = function namedFn(a: string) {};
+typeOf<typeof fn>();`,
+			checks: []string{"__assignType"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputFiles := []*harnessutil.TestFile{
+				{UnitName: "app.ts", Content: tt.content},
+			}
+
+			result := harnessutil.CompileFiles(t,
+				inputFiles,
+				nil,
+				harnessutil.TestConfiguration{},
+				&tsoptions.ParsedCommandLine{
+					ParsedConfig: &core.ParsedOptions{
+						CompilerOptions: &core.CompilerOptions{
+							Module:           core.ModuleKindCommonJS,
+							ModuleResolution: core.ModuleResolutionKindNode10,
+							Target:           core.ScriptTargetES2016,
+						},
+						FileNames: []string{"/app.ts"},
+					},
+				},
+				"/",
+				nil,
+			)
+
+			appJS := result.JS.GetOrZero("/app.js")
+			if appJS == nil {
+				t.Fatal("no app.js output")
+			}
+			t.Logf("app.js:\n%s", appJS.Content)
+
+			for _, check := range tt.checks {
+				if !strings.Contains(appJS.Content, check) {
+					t.Errorf("expected output to contain %q", check)
+				}
+			}
+		})
+	}
+}
