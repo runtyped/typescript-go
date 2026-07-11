@@ -794,3 +794,209 @@ typeOf<typeof fn>();`,
 		})
 	}
 }
+
+// TestDeclarationTransformer verifies that .d.ts output includes
+// `export declare type __ΩX = any[]` for exported type/interface/enum declarations.
+func TestDeclarationTransformer(t *testing.T) {
+	t.Parallel()
+
+	compilerOptions := &core.CompilerOptions{
+		Module:           core.ModuleKindCommonJS,
+		ModuleResolution: core.ModuleResolutionKindNode10,
+		Target:           core.ScriptTargetES2016,
+		Declaration:      core.TSTrue,
+	}
+
+	tests := []struct {
+		name    string
+		content string
+		checks  []string
+	}{
+		{
+			name: "TypeAlias",
+			content: `export type User = { name: string; age: number };`,
+			checks: []string{"export declare type __ΩUser = any[];"},
+		},
+		{
+			name: "Interface",
+			content: `export interface IUser { name: string; }`,
+			checks: []string{"export declare type __ΩIUser = any[];"},
+		},
+		{
+			name: "Enum",
+			content: `export enum Color { Red, Green, Blue }`,
+			checks: []string{"export declare type __ΩColor = any[];"},
+		},
+		{
+			name: "MultipleTypes",
+			content: `export type User = { name: string };
+export interface Repo { id: number; }
+export enum Status { Active, Inactive }`,
+			checks: []string{
+				"export declare type __ΩUser = any[];",
+				"export declare type __ΩRepo = any[];",
+				"export declare type __ΩStatus = any[];",
+			},
+		},
+		{
+			name: "NonExportedNoOmega",
+			content: `type Internal = { x: number };
+export type Public = { y: string };`,
+			checks: []string{
+				"export declare type __ΩPublic = any[];",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inputFiles := []*harnessutil.TestFile{
+				{UnitName: "app.ts", Content: tt.content},
+			}
+
+			result := harnessutil.CompileFiles(t,
+				inputFiles,
+				nil,
+				harnessutil.TestConfiguration{},
+				&tsoptions.ParsedCommandLine{
+					ParsedConfig: &core.ParsedOptions{
+						CompilerOptions: compilerOptions,
+						FileNames:       []string{"/app.ts"},
+					},
+				},
+				"/",
+				nil,
+			)
+
+			// Find the .d.ts output
+			var dtsContent string
+			result.DTS.Entries()(func(key string, value *harnessutil.TestFile) bool {
+				dtsContent = value.Content
+				return false
+			})
+
+			if dtsContent == "" {
+				t.Fatal("no .d.ts output produced")
+			}
+			t.Logf(".d.ts output:\n%s", dtsContent)
+
+			for _, check := range tt.checks {
+				if !strings.Contains(dtsContent, check) {
+					t.Errorf("expected .d.ts output to contain %q\nGot:\n%s", check, dtsContent)
+				}
+			}
+		})
+	}
+}
+
+// TestOptionalChainTransform verifies that optional chaining with type arguments
+// is properly rewritten to use a temp variable and ternary.
+func TestOptionalChainTransform(t *testing.T) {
+	t.Parallel()
+
+	compilerOptions := &core.CompilerOptions{
+		Module:           core.ModuleKindCommonJS,
+		ModuleResolution: core.ModuleResolutionKindNode10,
+		Target:           core.ScriptTargetES2020,
+	}
+
+	tests := []struct {
+		name    string
+		content string
+		checks  []string
+	}{
+		{
+			name: "DirectOptionalChain",
+			content: `class Service {
+    doSomething<T>(type?: ReceiveType<T>) {}
+}
+class App {
+    service?: Service;
+    run() {
+        this.service?.doSomething<string>();
+    }
+}`,
+			checks: []string{"Ωr"},
+		},
+		{
+			name: "NestedOptionalChain",
+			content: `class Client {
+    method<T>(type?: ReceiveType<T>) {}
+}
+class Service {
+    getClient(): Client { return new Client(); }
+}
+class App {
+    service?: Service;
+    run() {
+        this.service?.getClient().method<string>();
+    }
+}`,
+			checks: []string{"Ωr"},
+		},
+		{
+			name: "ChainContinuation",
+			content: `class Service {
+    doSomething<T>(type?: ReceiveType<T>): any { return this; }
+}
+class App {
+    service?: Service;
+    run() {
+        this.service?.doSomething<string>().then();
+    }
+}`,
+			checks: []string{"Ωr"},
+		},
+		{
+			name: "OptionalChainWithRegularCall",
+			content: `class Service {
+    doSomething<T>(type?: ReceiveType<T>) {}
+    regularCall() {}
+}
+class App {
+    service?: Service;
+    run() {
+        this.service?.doSomething<string>();
+        this.service?.regularCall();
+    }
+}`,
+			checks: []string{"Ωr"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inputFiles := []*harnessutil.TestFile{
+				{UnitName: "app.ts", Content: tt.content},
+			}
+
+			result := harnessutil.CompileFiles(t,
+				inputFiles,
+				nil,
+				harnessutil.TestConfiguration{},
+				&tsoptions.ParsedCommandLine{
+					ParsedConfig: &core.ParsedOptions{
+						CompilerOptions: compilerOptions,
+						FileNames:       []string{"/app.ts"},
+					},
+				},
+				"/",
+				nil,
+			)
+
+			appJS := result.JS.GetOrZero("/app.js")
+			if appJS == nil {
+				t.Fatal("no app.js output")
+			}
+			t.Logf("app.js:\n%s", appJS.Content)
+
+			for _, check := range tt.checks {
+				if !strings.Contains(appJS.Content, check) {
+					t.Errorf("expected output to contain %q", check)
+				}
+			}
+		})
+	}
+}

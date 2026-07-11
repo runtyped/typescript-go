@@ -85,6 +85,8 @@ func (e *emitter) runDeclarationTransformers(emitContext *printer.EmitContext, s
 		sourceFile = transformer.TransformSourceFile(sourceFile)
 		diags = append(diags, transformer.GetDiagnostics()...)
 	}
+	// Runtyped declaration transformer — appends __Ω type aliases to .d.ts output
+	sourceFile = runtyped.NewDeclarationTransformer(emitContext).TransformSourceFile(sourceFile)
 	return sourceFile, diags
 }
 

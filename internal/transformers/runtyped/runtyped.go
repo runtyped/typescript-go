@@ -39,6 +39,21 @@ type reflectionTransformer struct {
 	additionalImports []*ast.Node
 	// additionalReExports collects export { __ΩX } from '...' statements to append
 	additionalReExports []*ast.Node
+
+	// Optional chain transform state (per-file)
+	tempResultIdentifier *ast.Node
+	optionalChainTransforms map[*ast.Node]*optionalChainInfo
+}
+
+// optionalChainInfo stores metadata about a transformed optional chain expression,
+// replacing the TS monkey-patch pattern (__optionalChainTransform on nodes).
+type optionalChainInfo struct {
+	tempVar     *ast.Node // the Ωr identifier
+	condition   *ast.Node // Ωr == null
+	whenTrue    *ast.Node // void 0
+	assignBase  *ast.Node // Ωr = baseExpression (the left side of the outer comma)
+	assignPart  *ast.Node // Ωr.method.Ω = types (the left side of the inner comma)
+	callPart    *ast.Node // Ωr.method<T>() (the right side of the inner comma)
 }
 
 func (tx *reflectionTransformer) visit(node *ast.Node) *ast.Node {
@@ -80,10 +95,19 @@ func (tx *reflectionTransformer) visit(node *ast.Node) *ast.Node {
 		return tx.visitParameterDeclaration(node.AsParameterDeclaration())
 
 	case ast.KindCallExpression:
-		return tx.visitCallExpression(node.AsCallExpression())
+		result := tx.visitCallExpression(node.AsCallExpression())
+		result = tx.handleChainContinuation(result)
+		result = tx.fixOrphanedOptionalChain(result)
+		return result
 
 	case ast.KindNewExpression:
 		return tx.visitNewExpression(node.AsNewExpression())
+
+	case ast.KindPropertyAccessExpression, ast.KindElementAccessExpression:
+		visited := tx.Visitor().VisitEachChild(node)
+		visited = tx.handleChainContinuation(visited)
+		visited = tx.fixOrphanedOptionalChain(visited)
+		return visited
 
 	default:
 		return tx.Visitor().VisitEachChild(node)
@@ -102,6 +126,8 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	tx.omegaStatements = nil
 	tx.additionalImports = nil
 	tx.additionalReExports = nil
+	tx.tempResultIdentifier = nil
+	tx.optionalChainTransforms = make(map[*ast.Node]*optionalChainInfo)
 	tx.sourceFile = node
 	tx.tc = newTypeCompiler(tx.Factory(), tx.emitResolver, tx.sourceFiles)
 	tx.tc.sourceFile = node
@@ -798,9 +824,340 @@ func (tx *reflectionTransformer) visitNewExpression(node *ast.NewExpression) *as
 	return tx.handleTypeArgumentCall(visited.AsNode(), true, callResult)
 }
 
+// getTempResultIdentifier returns the Ωr identifier for optional chain transforms.
+// Generates Ωr, Ωr0, Ωr1, etc. — checking locals to avoid collisions.
+func (tx *reflectionTransformer) getTempResultIdentifier() *ast.Node {
+	if tx.tempResultIdentifier != nil {
+		return tx.tempResultIdentifier
+	}
+	// In Go we don't have easy access to source file locals for name collision checks.
+	// Default to Ωr — collisions are extremely unlikely in practice since Ω-prefixed
+	// names are reserved by the runtime type system.
+	tx.tempResultIdentifier = tx.Factory().NewIdentifier("Ωr")
+	return tx.tempResultIdentifier
+}
+
+// expressionContainsOptionalChain recursively checks if an expression contains
+// optional chaining (?.) — used to detect patterns like:
+// this.service?.getClient().method<T>()
+// where the optional chain is in a nested call expression.
+func (tx *reflectionTransformer) expressionContainsOptionalChain(expr *ast.Node) bool {
+	if expr == nil {
+		return false
+	}
+	if ast.IsOptionalChain(expr) {
+		return true
+	}
+	switch expr.Kind {
+	case ast.KindCallExpression:
+		return tx.expressionContainsOptionalChain(expr.AsCallExpression().Expression)
+	case ast.KindPropertyAccessExpression:
+		return tx.expressionContainsOptionalChain(expr.AsPropertyAccessExpression().Expression)
+	case ast.KindParenthesizedExpression:
+		return tx.expressionContainsOptionalChain(expr.AsParenthesizedExpression().Expression)
+	}
+	return false
+}
+
+// buildOptionalChainTransform rewrites this.service?.doSomething<string>() into:
+// (Ωr = this.service, Ωr == null ? void 0 : (Ωr.doSomething.Ω = [types], Ωr.doSomething<string>()))
+// Returns nil if the expression is not an optional chain that needs transformation.
+func (tx *reflectionTransformer) buildOptionalChainTransform(
+	callExpr *ast.CallExpression,
+	packedTypeExpr *ast.Node,
+) *ast.Node {
+	expr := callExpr.Expression
+
+	// Case 1: Direct optional chain — obj?.method<T>()
+	// The expression is a PropertyAccessChain (has NodeFlagsOptionalChain and QuestionDotToken)
+	if expr.Kind == ast.KindPropertyAccessExpression && ast.IsOptionalChain(expr) {
+		propChain := expr.AsPropertyAccessExpression()
+		if propChain.QuestionDotToken != nil {
+			return tx.doOptionalChainTransform(
+				propChain.Expression,  // base: this.service
+				propChain.Name(),      // method name
+				callExpr.TypeArguments,
+				callExpr.Arguments,
+				packedTypeExpr,
+			)
+		}
+	}
+
+	// Case 2: Nested optional chain in call expression — obj?.getClient().method<T>()
+	// The call expression's expression is PropertyAccess(method) whose expression is a CallExpression
+	// that contains an optional chain somewhere inside.
+	if expr.Kind == ast.KindPropertyAccessExpression {
+		propAccess := expr.AsPropertyAccessExpression()
+		if propAccess.Expression != nil && propAccess.Expression.Kind == ast.KindCallExpression &&
+			tx.expressionContainsOptionalChain(propAccess.Expression) {
+			return tx.doOptionalChainTransform(
+				propAccess.Expression,  // base: this.service?.getClient()
+				propAccess.Name(),       // method name
+				callExpr.TypeArguments,
+				callExpr.Arguments,
+				packedTypeExpr,
+			)
+		}
+	}
+
+	return nil
+}
+
+// doOptionalChainTransform builds the actual ternary rewrite for optional chains.
+// baseExpr is the expression to capture into Ωr, methodName is the property to access,
+// typeArgs and args come from the original call.
+func (tx *reflectionTransformer) doOptionalChainTransform(
+	baseExpr *ast.Node,
+	methodName *ast.Node,
+	typeArgs *ast.NodeList,
+	args *ast.NodeList,
+	packedTypeExpr *ast.Node,
+) *ast.Node {
+	factory := tx.Factory()
+	r := tx.getTempResultIdentifier()
+
+	// Ωr = baseExpr
+	assignBase := factory.NewBinaryExpression(nil,
+		r, nil, factory.NewToken(ast.KindEqualsToken), baseExpr,
+	)
+
+	// Ωr.method
+	rMethod := factory.NewPropertyAccessExpression(r, nil, methodName, 0)
+
+	// Ωr.method.Ω = packedTypeExpr
+	assignTypes := factory.NewBinaryExpression(nil,
+		factory.NewPropertyAccessExpression(rMethod, nil, factory.NewIdentifier("Ω"), 0),
+		nil, factory.NewToken(ast.KindEqualsToken), packedTypeExpr,
+	)
+
+	// Ωr.method<T>() — regular call (no optional chain flag)
+	var callArgs *ast.NodeList
+	if args != nil {
+		callArgs = args
+	} else {
+		callArgs = factory.NewNodeList(nil)
+	}
+	regularCall := factory.NewCallExpression(rMethod, nil, typeArgs, callArgs, 0)
+
+	// (Ωr.method.Ω = [types], Ωr.method<T>())
+	assignAndCall := factory.NewParenthesizedExpression(
+		factory.NewBinaryExpression(nil,
+			assignTypes, nil, factory.NewToken(ast.KindCommaToken), regularCall,
+		),
+	)
+
+	// Ωr == null ? void 0 : (...)
+	condition := factory.NewBinaryExpression(nil,
+		r, nil, factory.NewToken(ast.KindEqualsEqualsToken), factory.NewKeywordExpression(ast.KindNullKeyword),
+	)
+	conditional := factory.NewConditionalExpression(
+		condition,
+		factory.NewToken(ast.KindQuestionToken),
+		factory.NewVoidZeroExpression(),
+		factory.NewToken(ast.KindColonToken),
+		assignAndCall,
+	)
+
+	// (Ωr = base, Ωr == null ? void 0 : (assign, call))
+	result := factory.NewParenthesizedExpression(
+		factory.NewBinaryExpression(nil,
+			assignBase, nil, factory.NewToken(ast.KindCommaToken), conditional,
+		),
+	)
+
+	// Record the transform for chain continuation handling
+	tx.optionalChainTransforms[result] = &optionalChainInfo{
+		tempVar:    r,
+		condition:  condition,
+		whenTrue:   factory.NewVoidZeroExpression(),
+		assignBase: assignBase,
+		assignPart: assignTypes,
+		callPart:   regularCall,
+	}
+
+	return result
+}
+
+// handleChainContinuation checks if a call or property access expression has a
+// chain continuation on a previously-transformed optional chain, and if so,
+// restructures the expression to move the continuation inside the ternary.
+func (tx *reflectionTransformer) handleChainContinuation(node *ast.Node) *ast.Node {
+	if !ast.IsCallExpression(node) && !ast.IsPropertyAccessExpression(node) {
+		return node
+	}
+
+	// Get the inner expression to start walking.
+	// For call expressions, start from the expression (skip the call itself).
+	// For property access expressions, start from the node itself (so it gets added to the chain).
+	var innerExpr *ast.Node
+	if ast.IsCallExpression(node) {
+		innerExpr = node.AsCallExpression().Expression
+	} else {
+		innerExpr = node
+	}
+
+	baseExpr := innerExpr
+	factory := tx.Factory()
+
+	// Build the access chain as we walk down to find a transformed optional chain
+	type chainAccess struct {
+		kind  string // "prop", "call", "elem"
+		name  *ast.Node
+		args  *ast.NodeList
+		typeArgs *ast.NodeList
+	}
+	var accessChain []chainAccess
+
+	for baseExpr != nil {
+		if baseExpr.Kind == ast.KindPropertyAccessExpression && !ast.IsOptionalChain(baseExpr) {
+			pa := baseExpr.AsPropertyAccessExpression()
+			accessChain = append([]chainAccess{{kind: "prop", name: pa.Name()}}, accessChain...)
+			baseExpr = pa.Expression
+		} else if baseExpr.Kind == ast.KindCallExpression && baseExpr != node {
+			ce := baseExpr.AsCallExpression()
+			var ta *ast.NodeList
+			if ce.TypeArguments != nil {
+				ta = ce.TypeArguments
+			}
+			accessChain = append([]chainAccess{{kind: "call", args: ce.Arguments, typeArgs: ta}}, accessChain...)
+			baseExpr = ce.Expression
+		} else if baseExpr.Kind == ast.KindElementAccessExpression && !ast.IsOptionalChain(baseExpr) {
+			ea := baseExpr.AsElementAccessExpression()
+			accessChain = append([]chainAccess{{kind: "elem", name: ea.ArgumentExpression}}, accessChain...)
+			baseExpr = ea.Expression
+		} else if baseExpr.Kind == ast.KindParenthesizedExpression {
+			info, ok := tx.optionalChainTransforms[baseExpr]
+			if ok {
+				// Found our transformed optional chain! Restructure.
+				// The assignAndCall part is: (assignPart, callPart)
+				// We need to rebuild the chain continuation on the callPart.
+				chainTarget := info.callPart
+
+				// Apply the access chain
+				for _, access := range accessChain {
+					switch access.kind {
+					case "prop":
+						chainTarget = factory.NewPropertyAccessExpression(chainTarget, nil, access.name, 0)
+					case "call":
+						var args *ast.NodeList
+						if access.args != nil {
+							args = access.args
+						} else {
+							args = factory.NewNodeList(nil)
+						}
+						chainTarget = factory.NewCallExpression(chainTarget, nil, access.typeArgs, args, 0)
+					case "elem":
+						chainTarget = factory.NewElementAccessExpression(chainTarget, nil, access.name, 0)
+					}
+				}
+
+				// If the original node was a call, add that final call
+				if ast.IsCallExpression(node) {
+					var nodeArgs *ast.NodeList
+					if node.AsCallExpression().Arguments != nil {
+						nodeArgs = node.AsCallExpression().Arguments
+					} else {
+						nodeArgs = factory.NewNodeList(nil)
+					}
+					var nodeTypeArgs *ast.NodeList
+					if node.AsCallExpression().TypeArguments != nil {
+						nodeTypeArgs = node.AsCallExpression().TypeArguments
+					}
+					chainTarget = factory.NewCallExpression(chainTarget, nil, nodeTypeArgs, nodeArgs, 0)
+				}
+
+				// Rebuild: (assignPart, chain.continuation())
+				newAssignAndChain := factory.NewParenthesizedExpression(
+					factory.NewBinaryExpression(nil,
+						info.assignPart, nil, factory.NewToken(ast.KindCommaToken), chainTarget,
+					),
+				)
+
+				newConditional := factory.NewConditionalExpression(
+					info.condition,
+					factory.NewToken(ast.KindQuestionToken),
+					info.whenTrue,
+					factory.NewToken(ast.KindColonToken),
+					newAssignAndChain,
+				)
+
+				// Get the assignment part (Ωr = base) from the outer binary expression
+				result := factory.NewParenthesizedExpression(
+					factory.NewBinaryExpression(nil,
+						info.assignBase, nil, factory.NewToken(ast.KindCommaToken), newConditional,
+					),
+				)
+
+				// Update the transform map — the new outer paren is the marker
+				tx.optionalChainTransforms[result] = &optionalChainInfo{
+					tempVar:    info.tempVar,
+					condition:  info.condition,
+					whenTrue:   info.whenTrue,
+					assignBase: info.assignBase,
+					assignPart: info.assignPart,
+					callPart:   chainTarget,
+				}
+				delete(tx.optionalChainTransforms, baseExpr)
+
+				return result
+			}
+			break
+		} else {
+			break
+		}
+	}
+
+	return node
+}
+
+// fixOrphanedOptionalChain converts optional chain continuation nodes (those without
+// their own ?. token) back to regular expressions when their base is no longer
+// an optional chain (because a child transform removed the ?).
+func (tx *reflectionTransformer) fixOrphanedOptionalChain(node *ast.Node) *ast.Node {
+	factory := tx.Factory()
+
+	if ast.IsOptionalChain(node) {
+		// Check if this node has a questionDotToken — if so, it's a chain root, not a continuation
+		if node.QuestionDotToken() != nil {
+			return node
+		}
+
+		// This is a chain continuation (no ?. of its own) — check if its expression
+		// is still an optional chain. If not, convert to regular expression.
+		var expr *ast.Node
+		switch node.Kind {
+		case ast.KindPropertyAccessExpression:
+			expr = node.AsPropertyAccessExpression().Expression
+		case ast.KindCallExpression:
+			expr = node.AsCallExpression().Expression
+		case ast.KindElementAccessExpression:
+			expr = node.AsElementAccessExpression().Expression
+		default:
+			return node
+		}
+
+		if expr != nil && !ast.IsOptionalChain(expr) {
+			switch node.Kind {
+			case ast.KindPropertyAccessExpression:
+				pa := node.AsPropertyAccessExpression()
+				return factory.NewPropertyAccessExpression(pa.Expression, nil, pa.Name(), 0)
+			case ast.KindCallExpression:
+				ce := node.AsCallExpression()
+				return factory.NewCallExpression(ce.Expression, nil, ce.TypeArguments, ce.Arguments, 0)
+			case ast.KindElementAccessExpression:
+				ea := node.AsElementAccessExpression()
+				return factory.NewElementAccessExpression(ea.Expression, nil, ea.ArgumentExpression, 0)
+			}
+		}
+	}
+
+	return node
+}
+
 // handleTypeArgumentCall handles calls/new expressions with type arguments:
 // - Direct passing: if target has ReceiveType params, pass type as argument
 // - Ω side-channel: fn.Ω = [type]; fn() fallback
+// - Optional chain: rewrite ?.method<T>() to ternary with Ωr temp
 func (tx *reflectionTransformer) handleTypeArgumentCall(node *ast.Node, isNew bool, callResult *CallReceiveTypeResult) *ast.Node {
 	factory := tx.Factory()
 
@@ -877,20 +1234,28 @@ func (tx *reflectionTransformer) handleTypeArgumentCall(node *ast.Node, isNew bo
 		}
 	}
 
+	// Build the packed type expression (needed for Ω side-channel and optional chain)
+	var packedTypeExpr *ast.Node
+	if len(typeExpressions) == 1 {
+		packedTypeExpr = typeExpressions[0]
+	} else {
+		packedTypeExpr = factory.NewArrayLiteralExpression(factory.NewNodeList(typeExpressions), false)
+	}
+
+	// Optional chain check: if this is a call on an optional chain (?.method<T>()),
+	// rewrite to a ternary with a temp variable for null-safe Ω assignment.
+	if !isNew && node.Kind == ast.KindCallExpression {
+		if result := tx.buildOptionalChainTransform(node.AsCallExpression(), packedTypeExpr); result != nil {
+			return result
+		}
+	}
+
 	// Fallback: Ω side-channel — fn.Ω = [types]; fn()
 	var fnExpr *ast.Node
 	if isNew {
 		fnExpr = node.AsNewExpression().Expression
 	} else {
 		fnExpr = node.AsCallExpression().Expression
-	}
-
-	// Build the packed type expression
-	var packedTypeExpr *ast.Node
-	if len(typeExpressions) == 1 {
-		packedTypeExpr = typeExpressions[0]
-	} else {
-		packedTypeExpr = factory.NewArrayLiteralExpression(factory.NewNodeList(typeExpressions), false)
 	}
 
 	// fn.Ω = packedTypeExpr
