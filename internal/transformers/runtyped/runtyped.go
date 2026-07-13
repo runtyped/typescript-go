@@ -147,6 +147,23 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	newTopStatements = append(newTopStatements, tx.omegaStatements...)
 	newTopStatements = append(newTopStatements, tx.tc.functionTypeAssignments...)
 
+	// If a temp result identifier (Ωr) was used for chained/optional calls, declare it at the top
+	if tx.tempResultIdentifier != nil {
+		varDecl := tx.Factory().NewVariableStatement(
+			nil,
+			tx.Factory().NewVariableDeclarationList(
+				tx.Factory().NewNodeList([]*ast.Node{
+					tx.Factory().NewVariableDeclaration(
+						tx.tempResultIdentifier,
+						nil, nil, nil,
+					),
+				}),
+				ast.NodeFlagsNone,
+			),
+		)
+		newTopStatements = append(newTopStatements, varDecl)
+	}
+
 	// Find "use strict" / "use client" directive to keep it at the top
 	literalIdx := -1
 	for i, stmt := range originalStatements {
@@ -1256,6 +1273,112 @@ func (tx *reflectionTransformer) handleTypeArgumentCall(node *ast.Node, isNew bo
 		fnExpr = node.AsNewExpression().Expression
 	} else {
 		fnExpr = node.AsCallExpression().Expression
+	}
+
+	// Chained call handling: when the call expression is on a method whose
+	// receiver is itself a call expression (e.g. http.response<1>().response<2>()),
+	// introduce a temp variable (Ωr) to avoid double-evaluation of the inner call.
+	// Transform: (Ωr = innerCall, Ωr.method.Ω = [types], Ωr).method()
+	if !isNew && fnExpr.Kind == ast.KindPropertyAccessExpression {
+		callExpr := node.AsCallExpression()
+		propAccess := fnExpr.AsPropertyAccessExpression()
+		if propAccess.Expression.Kind == ast.KindCallExpression {
+			r := tx.getTempResultIdentifier()
+			innerCall := propAccess.Expression
+			methodName := propAccess.Name()
+
+			// Ωr = innerCall
+			assignBase := factory.NewBinaryExpression(nil,
+				r, nil,
+				factory.NewToken(ast.KindEqualsToken),
+				innerCall,
+			)
+
+			// Ωr.method.Ω = [types]
+			assignOmega := factory.NewBinaryExpression(nil,
+				factory.NewPropertyAccessExpression(
+					factory.NewPropertyAccessExpression(r, nil, methodName, 0),
+					nil, factory.NewIdentifier("Ω"), 0,
+				),
+				nil,
+				factory.NewToken(ast.KindEqualsToken),
+				packedTypeExpr,
+			)
+
+			// (Ωr = innerCall, Ωr.method.Ω = [types], Ωr)
+			innerExpr := factory.NewBinaryExpression(nil,
+				factory.NewBinaryExpression(nil,
+					assignBase, nil,
+					factory.NewToken(ast.KindCommaToken),
+					assignOmega,
+				),
+				nil,
+				factory.NewToken(ast.KindCommaToken),
+				r,
+			)
+
+			// (Ωr = innerCall, Ωr.method.Ω = [types], Ωr).method(args)
+			return factory.NewCallExpression(
+				factory.NewPropertyAccessExpression(
+					factory.NewParenthesizedExpression(innerExpr),
+					nil, methodName, 0,
+				),
+				nil, // type args erased
+				callExpr.TypeArguments,
+				callExpr.Arguments,
+				callExpr.Flags,
+			)
+		}
+
+		// Also handle parenthesized call expression: ((expr)).method<T>()
+		if propAccess.Expression.Kind == ast.KindParenthesizedExpression {
+			pe := propAccess.Expression.AsParenthesizedExpression()
+			if pe.Expression.Kind == ast.KindCallExpression {
+				r := tx.getTempResultIdentifier()
+				innerCall := pe.Expression
+				methodName := propAccess.Name()
+
+				// Ωr = innerCall
+				assignBase := factory.NewBinaryExpression(nil,
+					r, nil,
+					factory.NewToken(ast.KindEqualsToken),
+					innerCall,
+				)
+
+				// Ωr.method.Ω = [types]
+				assignOmega := factory.NewBinaryExpression(nil,
+					factory.NewPropertyAccessExpression(
+						factory.NewPropertyAccessExpression(r, nil, methodName, 0),
+						nil, factory.NewIdentifier("Ω"), 0,
+					),
+					nil,
+					factory.NewToken(ast.KindEqualsToken),
+					packedTypeExpr,
+				)
+
+				// (Ωr = innerCall, Ωr.method.Ω = [types], Ωr).method(args)
+				innerExpr := factory.NewBinaryExpression(nil,
+					factory.NewBinaryExpression(nil,
+						assignBase, nil,
+						factory.NewToken(ast.KindCommaToken),
+						assignOmega,
+					),
+					nil,
+					factory.NewToken(ast.KindCommaToken),
+					r,
+				)
+
+				return factory.NewParenthesizedExpression(
+					factory.NewCallExpression(
+						factory.NewPropertyAccessExpression(
+							factory.NewParenthesizedExpression(innerExpr),
+							nil, methodName, 0,
+						),
+						nil, callExpr.TypeArguments, callExpr.Arguments, callExpr.Flags,
+					),
+				)
+			}
+		}
 	}
 
 	// fn.Ω = packedTypeExpr
