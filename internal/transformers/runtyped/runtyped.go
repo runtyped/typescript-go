@@ -2,6 +2,7 @@ package runtyped
 
 import (
 	"strconv"
+	"sync/atomic"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/core"
@@ -13,13 +14,37 @@ import (
 // information (__type and __Ω) to classes, type aliases, and imports,
 // before type annotations are erased.
 func NewReflectionTransformer(opt *transformers.TransformOptions) *transformers.Transformer {
+	mode := opt.ReflectionMode
+	if mode == "" {
+		mode = GetReflectionModeOverride()
+	}
 	tx := &reflectionTransformer{
 		compilerOptions: opt.CompilerOptions,
 		emitContext:     opt.Context,
 		emitResolver:    opt.EmitResolver,
 		sourceFiles:     opt.SourceFiles,
+		reflectionMode:  mode,
 	}
 	return tx.NewTransformer(tx.visit, opt.Context)
+}
+
+// SetReflectionModeOverride sets the reflection mode for subsequently created
+// reflection transformers. Used by the Loader when TransformOptions isn't available.
+// This is not thread-safe — prefer setting TransformOptions.ReflectionMode directly.
+// Deprecated: use TransformOptions.ReflectionMode instead.
+func SetReflectionModeOverride(mode string) {
+	reflectionModeOverride.Store(mode)
+}
+
+var reflectionModeOverride atomic.Value
+
+// GetReflectionModeOverride returns the currently set reflection mode override.
+func GetReflectionModeOverride() string {
+	v := reflectionModeOverride.Load()
+	if v == nil {
+		return ""
+	}
+	return v.(string)
 }
 
 type reflectionTransformer struct {
@@ -28,6 +53,10 @@ type reflectionTransformer struct {
 	emitContext     *printer.EmitContext
 	emitResolver    printer.EmitResolver
 	sourceFiles     func() []*ast.SourceFile
+
+	// Reflection mode: "default" (all types reflected), "never" (no reflection),
+	// "explicit" (only @reflection-decorated nodes). Empty = "default".
+	reflectionMode string
 
 	// Per-file state
 	sourceFile *ast.SourceFile
@@ -119,6 +148,11 @@ func (tx *reflectionTransformer) visit(node *ast.Node) *ast.Node {
 func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node {
 	// Skip non-TS/TSX files (JS, JSON, etc.)
 	if node.ScriptKind != core.ScriptKindTS && node.ScriptKind != core.ScriptKindTSX {
+		return node.AsNode()
+	}
+
+	// If reflection mode is "never", skip transformation entirely
+	if tx.reflectionMode == "never" {
 		return node.AsNode()
 	}
 
@@ -278,14 +312,49 @@ func (tx *reflectionTransformer) processDeclarations() {
 	}
 }
 
+// shouldReflect checks if a declaration should be reflected based on the reflection mode.
+// - "default" or "": all declarations are reflected
+// - "never": no declarations are reflected (handled at source file level, but this is a safety check)
+// - "explicit": only declarations with @reflection JSDoc tag are reflected
+func (tx *reflectionTransformer) shouldReflect(node *ast.Node) bool {
+	if tx.reflectionMode == "explicit" {
+		return tx.hasReflectionJSDoc(node)
+	}
+	return true
+}
+
+// hasReflectionJSDoc checks if a node has a @reflection JSDoc tag.
+func (tx *reflectionTransformer) hasReflectionJSDoc(node *ast.Node) bool {
+	jsdocs := node.JSDoc(tx.sourceFile)
+	for _, jsdoc := range jsdocs {
+		if jsdoc.Kind != ast.KindJSDoc {
+			continue
+		}
+		doc := jsdoc.AsJSDoc()
+		if doc.Tags == nil {
+			continue
+		}
+		for _, tag := range doc.Tags.Nodes {
+			if tag.Kind == ast.KindJSDocUnknownTag {
+				tagName := tag.AsJSDocUnknownTag().TagName
+				if tagName != nil && tagName.AsIdentifier().Text == "reflection" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // ─── Classes ───
 
 func (tx *reflectionTransformer) visitClassDeclaration(node *ast.ClassDeclaration) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsClassDeclaration()
 
-	// Check reflection
-	// For now, default to true (reflection enabled)
-	// Full config resolution is deferred
+	// In explicit mode, only reflect nodes with @reflection JSDoc tag
+	if !tx.shouldReflect(node.AsNode()) {
+		return visited.AsNode()
+	}
 
 	// Compile the class type
 	typeExpr := tx.tc.getTypeOfType(node.AsNode())
@@ -311,6 +380,10 @@ func (tx *reflectionTransformer) visitClassDeclaration(node *ast.ClassDeclaratio
 
 func (tx *reflectionTransformer) visitClassExpression(node *ast.ClassExpression) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsClassExpression()
+
+	if !tx.shouldReflect(node.AsNode()) {
+		return visited.AsNode()
+	}
 
 	typeExpr := tx.tc.getTypeOfType(node.AsNode())
 	if typeExpr == nil {
@@ -338,6 +411,10 @@ func (tx *reflectionTransformer) visitClassExpression(node *ast.ClassExpression)
 func (tx *reflectionTransformer) visitTypeAliasDeclaration(node *ast.TypeAliasDeclaration) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsTypeAliasDeclaration()
 
+	if !tx.shouldReflect(node.AsNode()) {
+		return visited.AsNode()
+	}
+
 	// Register for compilation
 	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
 		declNode := node.AsNode()
@@ -356,6 +433,10 @@ func (tx *reflectionTransformer) visitTypeAliasDeclaration(node *ast.TypeAliasDe
 func (tx *reflectionTransformer) visitInterfaceDeclaration(node *ast.InterfaceDeclaration) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsInterfaceDeclaration()
 
+	if !tx.shouldReflect(node.AsNode()) {
+		return visited.AsNode()
+	}
+
 	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
 		declNode := node.AsNode()
 		if _, exists := tx.tc.compileDeclarations[declNode]; !exists {
@@ -372,6 +453,10 @@ func (tx *reflectionTransformer) visitInterfaceDeclaration(node *ast.InterfaceDe
 
 func (tx *reflectionTransformer) visitEnumDeclaration(node *ast.EnumDeclaration) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node.AsNode()).AsEnumDeclaration()
+
+	if !tx.shouldReflect(node.AsNode()) {
+		return visited.AsNode()
+	}
 
 	if !hasModifierKind(node.AsNode(), ast.KindDeclareKeyword) {
 		declNode := node.AsNode()
@@ -391,6 +476,10 @@ func (tx *reflectionTransformer) visitEnumDeclaration(node *ast.EnumDeclaration)
 
 func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node).AsFunctionDeclaration()
+
+	if !tx.shouldReflect(node) {
+		return visited.AsNode()
+	}
 
 	// Inject Ω reset if function has ReceiveType params
 	visited = tx.injectResetOmega(visited.AsNode()).AsFunctionDeclaration()
@@ -441,6 +530,10 @@ func (tx *reflectionTransformer) visitFunctionDeclaration(node *ast.Node) *ast.N
 func (tx *reflectionTransformer) visitFunctionExpression(node *ast.Node) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node).AsFunctionExpression()
 
+	if !tx.shouldReflect(node) {
+		return visited.AsNode()
+	}
+
 	// Inject Ω reset if function has ReceiveType params
 	visited = tx.injectResetOmega(visited.AsNode()).AsFunctionExpression()
 
@@ -455,6 +548,10 @@ func (tx *reflectionTransformer) visitFunctionExpression(node *ast.Node) *ast.No
 
 func (tx *reflectionTransformer) visitArrowFunction(node *ast.Node) *ast.Node {
 	visited := tx.Visitor().VisitEachChild(node).AsArrowFunction()
+
+	if !tx.shouldReflect(node) {
+		return visited.AsNode()
+	}
 
 	// Inject Ω reset if function has ReceiveType params
 	visited = tx.injectResetOmega(visited.AsNode()).AsArrowFunction()

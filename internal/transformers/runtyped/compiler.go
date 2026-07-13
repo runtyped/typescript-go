@@ -1120,6 +1120,11 @@ func (tc *typeCompiler) extractTypeReferenceFromEntityName(typeName *ast.Node, t
 	}
 
 	declaration := resolved.declaration
+	if declaration == nil {
+		// Import could not be resolved — fall back to any
+		program.pushOp(OpAny)
+		return
+	}
 	declSourceFile := findSourceFile(declaration)
 
 	isFromImport := resolved.importDeclaration != nil
