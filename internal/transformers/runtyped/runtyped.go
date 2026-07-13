@@ -142,9 +142,15 @@ func (tx *reflectionTransformer) visitSourceFile(node *ast.SourceFile) *ast.Node
 	// This is the iterative loop from compiler.ts that compiles all pending declarations
 	tx.processDeclarations()
 
-	// Build new top statements: omega variables + hoisted function __type assignments
+	// Build new top statements: omega variables + __assignType helper + hoisted function __type assignments
 	var newTopStatements []*ast.Node
 	newTopStatements = append(newTopStatements, tx.omegaStatements...)
+
+	// Emit __assignType helper if any function expressions/arrows were wrapped
+	if tx.tc.embedAssignType {
+		newTopStatements = append(newTopStatements, tx.createAssignTypeHelper())
+	}
+
 	newTopStatements = append(newTopStatements, tx.tc.functionTypeAssignments...)
 
 	// If a temp result identifier (Ωr) was used for chained/optional calls, declare it at the top
@@ -778,6 +784,26 @@ func (tx *reflectionTransformer) wrapWithAssignType(fn *ast.Node, typeExpr *ast.
 		tx.Factory().NewNodeList([]*ast.Node{fn, typeExpr}),
 		ast.NodeFlagsNone,
 	)
+}
+
+// createAssignTypeHelper builds the __assignType function declaration:
+//
+//	function __assignType(fn, args) { fn.__type = args; return fn; }
+func (tx *reflectionTransformer) createAssignTypeHelper() *ast.Node {
+	f := tx.Factory()
+	fnParam := f.NewParameterDeclaration(nil, nil, f.NewIdentifier("fn"), nil, nil, nil)
+	argsParam := f.NewParameterDeclaration(nil, nil, f.NewIdentifier("args"), nil, nil, nil)
+	body := f.NewBlock(f.NewNodeList([]*ast.Node{
+		f.NewExpressionStatement(
+			f.NewBinaryExpression(nil,
+				f.NewPropertyAccessExpression(f.NewIdentifier("fn"), nil, f.NewIdentifier("__type"), 0),
+				nil,
+				f.NewToken(ast.KindEqualsToken),
+				f.NewIdentifier("args"))),
+		f.NewReturnStatement(f.NewIdentifier("fn")),
+	}), true)
+	return f.NewFunctionDeclaration(nil, nil, f.NewIdentifier("__assignType"), nil,
+		f.NewNodeList([]*ast.Node{fnParam, argsParam}), nil, nil, body)
 }
 
 // serializeEntityNameAsExpression converts an Identifier to an expression.
