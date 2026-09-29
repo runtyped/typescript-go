@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/printer"
-	"github.com/microsoft/typescript-go/internal/testutil/parsetestutil"
-	"github.com/microsoft/typescript-go/internal/transformers"
-	"github.com/microsoft/typescript-go/internal/transformers/runtyped"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/printer"
+	"github.com/microsoft/TypeScript/tsc/internal/testutil/parsetestutil"
+	"github.com/microsoft/TypeScript/tsc/internal/transformers"
+	"github.com/microsoft/TypeScript/tsc/internal/transformers/runtyped"
 )
 
 // transformEmit runs the reflection transformer on the given input and returns the emitted code.

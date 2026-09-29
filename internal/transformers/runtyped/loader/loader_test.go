@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/microsoft/typescript-go/internal/transformers/runtyped/loader"
+	"github.com/microsoft/TypeScript/tsc/internal/transformers/runtyped/loader"
 )
 
 // testDir is the directory where test files are placed.

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/transformers/runtyped/loader"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/transformers/runtyped/loader"
 )
 
 func TestLoader_KnownFilesTracking(t *testing.T) {
