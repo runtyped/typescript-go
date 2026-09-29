@@ -29,6 +29,12 @@ type TransformOptions struct {
 	Resolver                  binder.ReferenceResolver
 	EmitResolver              printer.EmitResolver
 	GetEmitModuleFormatOfFile func(file ast.HasFileName) core.ModuleKind
+	SourceFiles               func() []*ast.SourceFile
+
+	// ReflectionMode is used by the runtyped reflection transformer.
+	// Values: "default" (all types), "never" (no reflection), "explicit" (@reflection only).
+	// Empty means "default".
+	ReflectionMode string
 }
 
 type TransformerFactory = func(opt *TransformOptions) *Transformer
