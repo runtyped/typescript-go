@@ -1028,14 +1028,21 @@ func (tc *typeCompiler) extractTypeReference(node *ast.TypeReferenceNode, progra
 	tc.extractTypeReferenceFromEntityName(node.TypeName, node.TypeArguments, program)
 }
 
-// extractTypeReferenceFromExpression handles ExpressionWithTypeArguments.
+// extractTypeReferenceFromExpression handles heritage-clause types. Upstream
+// (TS 7 era) now emits KindTypeReference nodes for extends clauses;
+// KindExpressionWithTypeArguments remains for legacy/other producers.
 func (tc *typeCompiler) extractTypeReferenceFromExpression(node *ast.Node, program *compilerProgram) {
-	ewta := node.AsExpressionWithTypeArguments()
-	var typeName *ast.Node
-	if ewta.Expression.Kind == ast.KindIdentifier {
-		typeName = ewta.Expression
+	switch node.Kind {
+	case ast.KindTypeReference:
+		tc.extractTypeReferenceFromEntityName(node.AsTypeReferenceNode().TypeName, node.AsTypeReferenceNode().TypeArguments, program)
+	case ast.KindExpressionWithTypeArguments:
+		ewta := node.AsExpressionWithTypeArguments()
+		var typeName *ast.Node
+		if ewta.Expression.Kind == ast.KindIdentifier {
+			typeName = ewta.Expression
+		}
+		tc.extractTypeReferenceFromEntityName(typeName, ewta.TypeArguments, program)
 	}
-	tc.extractTypeReferenceFromEntityName(typeName, ewta.TypeArguments, program)
 }
 
 // extractTypeReferenceFromIdentifier handles a bare identifier as a type reference.

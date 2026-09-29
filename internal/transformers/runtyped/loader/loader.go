@@ -144,10 +144,10 @@ func (l *Loader) compileAndEmit(source, path string) (string, error) {
 
 	currentDir := filepath.Dir(path)
 
-	host := compiler.NewCompilerHost(currentDir, fs, bundled.LibPath(), nil, nil)
+	host := compiler.NewCompilerHost(currentDir, fs, bundled.LibPath(), nil, nil, nil)
 
 	config := &tsoptions.ParsedCommandLine{
-		ParsedConfig: &core.ParsedOptions{
+		ParsedConfig: &tsoptions.ParsedOptions{
 			CompilerOptions: compilerOptions,
 			FileNames:       []string{path},
 		},
@@ -173,7 +173,7 @@ func (l *Loader) compileAndEmit(source, path string) (string, error) {
 	// Emit and capture output
 	var output string
 	emitResult := program.Emit(context.Background(), compiler.EmitOptions{
-		TargetSourceFile: targetFile,
+		TargetSourceFiles: []*ast.SourceFile{targetFile},
 		WriteFile: func(fileName string, text string, _ *compiler.WriteFileData) error {
 			output = text
 			return nil

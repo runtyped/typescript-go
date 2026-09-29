@@ -31,7 +31,7 @@ func compileHoistFiles(t *testing.T, files map[string]string) string {
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,

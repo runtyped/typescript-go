@@ -24,7 +24,7 @@ func TestCompileFilesMultiFile(t *testing.T) {
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -81,7 +81,7 @@ func TestNamedReExportMultiFile(t *testing.T) {
 			nil,
 			harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: compilerOptions,
 					FileNames:       fileNames,
 				},
@@ -210,7 +210,7 @@ func TestCrossFileResolution(t *testing.T) {
 			nil,
 			harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: compilerOptions,
 					FileNames:       fileNames,
 				},
@@ -342,7 +342,7 @@ getType<string>();`},
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -382,7 +382,7 @@ func TestReceiveTypeArrowFunction(t *testing.T) {
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -414,7 +414,7 @@ export type a = Partial<User>;`},
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -451,7 +451,7 @@ func TestFunctionTypeHoisting(t *testing.T) {
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -496,7 +496,7 @@ func TestFunctionTypeHoistingBlockScoped(t *testing.T) {
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -583,7 +583,7 @@ function transform<T extends object>(data: T): T {
 				nil,
 				harnessutil.TestConfiguration{},
 				&tsoptions.ParsedCommandLine{
-					ParsedConfig: &core.ParsedOptions{
+					ParsedConfig: &tsoptions.ParsedOptions{
 						CompilerOptions: &core.CompilerOptions{
 							Module:           core.ModuleKindCommonJS,
 							ModuleResolution: core.ModuleResolutionKindNode10,
@@ -627,7 +627,7 @@ export type __ΩT2 = any[];`},
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -664,7 +664,7 @@ function fn(logger: Logger) {}`},
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -891,7 +891,7 @@ function mySerialize<T>(type?: ReceiveType<T>) {
 				nil,
 				harnessutil.TestConfiguration{},
 				&tsoptions.ParsedCommandLine{
-					ParsedConfig: &core.ParsedOptions{
+					ParsedConfig: &tsoptions.ParsedOptions{
 						CompilerOptions: &core.CompilerOptions{
 							Module:           core.ModuleKindCommonJS,
 							ModuleResolution: core.ModuleResolutionKindNode10,
@@ -984,7 +984,7 @@ export type Public = { y: string };`,
 				nil,
 				harnessutil.TestConfiguration{},
 				&tsoptions.ParsedCommandLine{
-					ParsedConfig: &core.ParsedOptions{
+					ParsedConfig: &tsoptions.ParsedOptions{
 						CompilerOptions: compilerOptions,
 						FileNames:       []string{"/app.ts"},
 					},
@@ -1072,7 +1072,7 @@ function processResult(r: AppResult<number>) {
 			nil,
 			harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: compilerOptions,
 					FileNames:       fileNames,
 				},
@@ -1141,7 +1141,7 @@ const type = typeOf<ReadUser>();`},
 				nil,
 				harnessutil.TestConfiguration{},
 				&tsoptions.ParsedCommandLine{
-					ParsedConfig: &core.ParsedOptions{
+					ParsedConfig: &tsoptions.ParsedOptions{
 						CompilerOptions: &core.CompilerOptions{
 							Module:           core.ModuleKindCommonJS,
 							ModuleResolution: core.ModuleResolutionKindNode10,
@@ -1204,7 +1204,7 @@ func compileSingleFileJS(t *testing.T, content string) string {
 		nil,
 		harnessutil.TestConfiguration{},
 		&tsoptions.ParsedCommandLine{
-			ParsedConfig: &core.ParsedOptions{
+			ParsedConfig: &tsoptions.ParsedOptions{
 				CompilerOptions: &core.CompilerOptions{
 					Module:           core.ModuleKindCommonJS,
 					ModuleResolution: core.ModuleResolutionKindNode10,
@@ -1243,7 +1243,7 @@ func TestChainedMethodCalls(t *testing.T) {
 		result := harnessutil.CompileFiles(t,
 			inputFiles, nil, harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: compilerOptions,
 					FileNames:        []string{"/app.ts"},
 				},
@@ -1534,7 +1534,7 @@ class App {
 				nil,
 				harnessutil.TestConfiguration{},
 				&tsoptions.ParsedCommandLine{
-					ParsedConfig: &core.ParsedOptions{
+					ParsedConfig: &tsoptions.ParsedOptions{
 						CompilerOptions: compilerOptions,
 						FileNames:       []string{"/app.ts"},
 					},

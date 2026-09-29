@@ -31,7 +31,7 @@ func TestNamedReExportSpecs(t *testing.T) {
 		result := harnessutil.CompileFiles(t,
 			inputFiles, nil, harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: compilerOptions,
 					FileNames:       fileNames,
 				},

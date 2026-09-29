@@ -22,7 +22,7 @@ func TestTranspileSpecGaps(t *testing.T) {
 		result := harnessutil.CompileFiles(t,
 			inputFiles, nil, harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: &core.CompilerOptions{
 						Module:           core.ModuleKindCommonJS,
 						ModuleResolution: core.ModuleResolutionKindNode10,
@@ -99,7 +99,7 @@ function fn(logger: Logger) {}`,
 		result := harnessutil.CompileFiles(t,
 			inputFiles, nil, harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: &core.CompilerOptions{
 						Module:           core.ModuleKindCommonJS,
 						ModuleResolution: core.ModuleResolutionKindNode10,
@@ -141,7 +141,7 @@ function fn(logger: Logger) {}`,
 		result := harnessutil.CompileFiles(t,
 			inputFiles, nil, harnessutil.TestConfiguration{},
 			&tsoptions.ParsedCommandLine{
-				ParsedConfig: &core.ParsedOptions{
+				ParsedConfig: &tsoptions.ParsedOptions{
 					CompilerOptions: &core.CompilerOptions{
 						Module:           core.ModuleKindCommonJS,
 						ModuleResolution: core.ModuleResolutionKindNode10,
