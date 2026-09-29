@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/microsoft/typescript-go/internal/tsoptions/tsoptionstest"
+	"github.com/microsoft/TypeScript/tsc/internal/tsoptions/tsoptionstest"
 )
 
 func buildHost(files map[string]string) *tsoptionstest.VfsParseConfigHost {

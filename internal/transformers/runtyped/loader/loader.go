@@ -9,17 +9,17 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/bundled"
-	"github.com/microsoft/typescript-go/internal/compiler"
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/tsoptions"
-	"github.com/microsoft/typescript-go/internal/tspath"
-	"github.com/microsoft/typescript-go/internal/transformers/runtyped"
-	"github.com/microsoft/typescript-go/internal/vfs"
-	"github.com/microsoft/typescript-go/internal/vfs/cachedvfs"
-	"github.com/microsoft/typescript-go/internal/vfs/osvfs"
-	"github.com/microsoft/typescript-go/internal/vfs/vfstest"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/bundled"
+	"github.com/microsoft/TypeScript/tsc/internal/compiler"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/tsoptions"
+	"github.com/microsoft/TypeScript/tsc/internal/tspath"
+	"github.com/microsoft/TypeScript/tsc/internal/transformers/runtyped"
+	"github.com/microsoft/TypeScript/tsc/internal/vfs"
+	"github.com/microsoft/TypeScript/tsc/internal/vfs/cachedvfs"
+	"github.com/microsoft/TypeScript/tsc/internal/vfs/osvfs"
+	"github.com/microsoft/TypeScript/tsc/internal/vfs/vfstest"
 )
 
 // ReflectionMode controls how reflection is applied.

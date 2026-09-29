@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/microsoft/typescript-go/internal/tsoptions"
-	"github.com/microsoft/typescript-go/internal/vfs"
+	"github.com/microsoft/TypeScript/tsc/internal/tsoptions"
+	"github.com/microsoft/TypeScript/tsc/internal/vfs"
 )
 
 // Mode represents the reflection mode for a file.

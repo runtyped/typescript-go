@@ -1,7 +1,7 @@
 package runtyped
 
 import (
-	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
 )
 
 // knownClasses maps built-in class names to their ReflectionOp.

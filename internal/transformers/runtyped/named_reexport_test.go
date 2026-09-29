@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/microsoft/typescript-go/internal/core"
-	"github.com/microsoft/typescript-go/internal/tsoptions"
-	"github.com/microsoft/typescript-go/internal/testutil/harnessutil"
+	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/tsoptions"
+	"github.com/microsoft/TypeScript/tsc/internal/testutil/harnessutil"
 )
 
 // TestNamedReExportSpecs ports named-reexport.spec.ts (50 tests).

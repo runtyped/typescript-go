@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/printer"
+	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/printer"
 )
 
 // resolveDeclarationResult holds a resolved declaration and metadata.
