@@ -272,4 +272,164 @@ type RegularType = number;`)
 }`)
 		assertNotContains(t, output, "__ΩDeclaredInterface")
 	})
+
+	// ── Port of declare-statement-filtering.spec.ts (remaining cases) ──
+
+	t.Run("ExportDeclareEnumNoOmega", func(t *testing.T) {
+		output := transformEmit(t, `export declare enum DeclaredEnum {
+    A,
+    B
+}`)
+		assertNotContains(t, output, "__ΩDeclaredEnum")
+	})
+
+	t.Run("ExportedRegularTypeGeneratesExport", func(t *testing.T) {
+		output := transformEmit(t, `export type RegularType = string;`)
+		assertContains(t, output, "__ΩRegularType")
+		assertContains(t, output, "export")
+	})
+
+	t.Run("ExportedRegularInterfaceGeneratesExport", func(t *testing.T) {
+		output := transformEmit(t, `export interface RegularInterface {
+    id: number;
+}`)
+		assertContains(t, output, "__ΩRegularInterface")
+	})
+
+	t.Run("ExportedRegularEnumGeneratesExport", func(t *testing.T) {
+		output := transformEmit(t, `export enum RegularEnum {
+    A,
+    B
+}`)
+		assertContains(t, output, "__ΩRegularEnum")
+	})
+
+	t.Run("DeclareClassAndRegularClassBothGetReflection", func(t *testing.T) {
+		// Note: unlike declare type/interface/enum, declare class currently still
+		// gets reflection in the transform output. Documents current behavior.
+		output := transformEmit(t, `declare class DeclaredClass {
+    id: number;
+    getName(): string;
+}
+
+class RegularClass {
+    id: number = 0;
+}`)
+
+		assertContains(t, output, "static __type")
+		assertContains(t, output, "RegularClass")
+		assertContains(t, output, "DeclaredClass")
+	})
+
+	t.Run("DeclareFunctionAndRegularFunctionBothGetReflection", func(t *testing.T) {
+		// Note: unlike declare type/interface/enum, declare function currently still
+		// gets reflection in the transform output. Documents current behavior.
+		output := transformEmit(t, `declare function declaredFunction(x: number): string;
+
+function regularFunction(x: number): string {
+    return x.toString();
+}`)
+
+		assertContains(t, output, "regularFunction.__type")
+	})
+
+	t.Run("GenericTypeWithDeclareTypeConstraint", func(t *testing.T) {
+		output := transformEmit(t, `declare type Identifiable = { id: string };
+
+type WithTimestamp<T extends Identifiable> = T & { timestamp: Date };`)
+
+		assertContains(t, output, "__ΩWithTimestamp")
+		assertNotContains(t, output, "__ΩIdentifiable")
+	})
+
+	t.Run("DeclareWithTypeParameters", func(t *testing.T) {
+		output := transformEmit(t, `declare type GenericDeclare<T> = { value: T };
+
+type ConcreteType = GenericDeclare<string>;`)
+
+		assertContains(t, output, "__ΩConcreteType")
+		assertNotContains(t, output, "__ΩGenericDeclare")
+	})
+
+	t.Run("DeclareInterfaceWithMethodSignatures", func(t *testing.T) {
+		output := transformEmit(t, `declare interface ServiceInterface {
+    getData(): Promise<string>;
+    setData(value: string): void;
+}
+
+interface MyService extends ServiceInterface {
+    customMethod(): void;
+}`)
+
+		assertContains(t, output, "__ΩMyService")
+		assertNotContains(t, output, "__ΩServiceInterface")
+	})
+
+	t.Run("DeclareEnumUsedInRegularType", func(t *testing.T) {
+		output := transformEmit(t, `declare enum ExternalStatus {
+    Active,
+    Inactive
+}
+
+type StatusWrapper = {
+    status: ExternalStatus;
+};`)
+
+		assertContains(t, output, "__ΩStatusWrapper")
+		assertNotContains(t, output, "__ΩExternalStatus")
+	})
+
+	t.Run("MultipleDeclareStatementsInSequence", func(t *testing.T) {
+		output := transformEmit(t, `declare type A = string;
+declare type B = number;
+declare type C = boolean;
+declare interface D { x: number; }
+declare interface E { y: string; }
+declare enum F { X, Y }`)
+
+		assertNotContains(t, output, "__ΩA")
+		assertNotContains(t, output, "__ΩB")
+		assertNotContains(t, output, "__ΩC")
+		assertNotContains(t, output, "__ΩD")
+		assertNotContains(t, output, "__ΩE")
+		assertNotContains(t, output, "__ΩF")
+	})
+
+	t.Run("DeclareStatementsWithJSDocComments", func(t *testing.T) {
+		output := transformEmit(t, `/**
+ * This is a declared type with documentation
+ * @description Some description
+ */
+declare type DocumentedDeclare = string;
+
+/**
+ * This is a regular type with documentation
+ */
+type DocumentedRegular = number;`)
+
+		assertNotContains(t, output, "__ΩDocumentedDeclare")
+		assertContains(t, output, "__ΩDocumentedRegular")
+	})
+
+	t.Run("UnionTypeCombiningDeclaredAndRegular", func(t *testing.T) {
+		output := transformEmit(t, `declare type ExternalType = { external: true };
+type InternalType = { internal: true };
+
+type UnionType = ExternalType | InternalType;`)
+
+		assertContains(t, output, "__ΩUnionType")
+		assertContains(t, output, "__ΩInternalType")
+		assertNotContains(t, output, "__ΩExternalType")
+	})
+
+	t.Run("IntersectionTypeCombiningDeclaredAndRegular", func(t *testing.T) {
+		output := transformEmit(t, `declare type ExternalMixin = { external: true };
+type InternalMixin = { internal: true };
+
+type IntersectionType = ExternalMixin & InternalMixin;`)
+
+		assertContains(t, output, "__ΩIntersectionType")
+		assertContains(t, output, "__ΩInternalMixin")
+		assertNotContains(t, output, "__ΩExternalMixin")
+	})
 }

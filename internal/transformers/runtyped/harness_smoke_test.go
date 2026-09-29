@@ -570,6 +570,77 @@ function transform<T extends object>(data: T): T {
 }`,
 			checks: []string{"process.__type", "transform.__type"},
 		},
+		{
+			name: "GenericTypeParameterInArrowFunctions",
+			content: `const wrapper = <T>(value: T): T => {
+    return identity<T>(value);
+};
+const identity = <T>(value: T): T => value;`,
+			checks: []string{"__type"},
+		},
+		{
+			name: "GenericTypeParameterMultipleTypeParams",
+			content: `function map<T, U>(value: T, fn: (v: T) => U): U {
+    return apply<T, U>(value, fn);
+}
+function apply<T, U>(value: T, fn: (v: T) => U): U {
+    return fn(value);
+}`,
+			checks: []string{"map.__type", "apply.__type"},
+		},
+		{
+			name: "GenericTypeParameterInClassMethods",
+			content: `class Processor {
+    process<T>(value: T): T {
+        return this.transform<T>(value);
+    }
+    transform<T>(value: T): T {
+        return value;
+    }
+}`,
+			checks: []string{"Processor"},
+		},
+		{
+			name: "GenericTypeParameterWithDefaultType",
+			content: `function create<T = string>(value: T): T {
+    return process<T>(value);
+}
+function process<T = string>(value: T): T {
+    return value;
+}`,
+			checks: []string{"create.__type", "process.__type"},
+		},
+		{
+			name: "GenericTypeParameterInTypeReferenceWithTypeArguments",
+			content: `function wrap<T>(value: T): Array<T> {
+    return makeArray<T>(value);
+}
+function makeArray<T>(value: T): Array<T> {
+    return [value];
+}`,
+			checks: []string{"wrap.__type", "makeArray.__type"},
+		},
+		{
+			name: "GenericTypeParameterInUnionTypes",
+			content: `function maybe<T>(value: T | undefined): T | undefined {
+    return process<T>(value);
+}
+function process<T>(value: T | undefined): T | undefined {
+    return value;
+}`,
+			checks: []string{"maybe.__type", "process.__type"},
+		},
+		{
+			name: "GenericTypeParameterInIntersectionTypes",
+			content: `interface Named { name: string }
+function extend<T>(value: T): T & Named {
+    return addName<T>(value);
+}
+function addName<T>(value: T): T & Named {
+    return { ...value, name: 'test' } as T & Named;
+}`,
+			checks: []string{"extend.__type", "addName.__type"},
+		},
 	}
 
 	for _, tt := range tests {
